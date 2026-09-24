@@ -1,0 +1,13 @@
+{
+  "id": "failure-missing-route",
+  "label": "Fault — Router cannot determine a route (human triage)",
+  "group": "failure",
+  "userInput": "I bought the Pro plan 200 days ago and I'd like a refund.",
+  "facts": {
+    "purchase_age_days": 200,
+    "refund_window_days": 30,
+    "account_status": "active",
+    "previous_refunds_count": 0
+  },
+  "fault": { "stage": "semantic_router", "kind": "missing-route" }
+}

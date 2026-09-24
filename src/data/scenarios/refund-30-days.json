@@ -1,0 +1,12 @@
+{
+  "id": "refund-30-days",
+  "label": "Refund — Pro plan, 30 days (approve, boundary)",
+  "group": "refund",
+  "userInput": "I bought the Pro plan 30 days ago and want a refund.",
+  "facts": {
+    "purchase_age_days": 30,
+    "refund_window_days": 30,
+    "account_status": "active",
+    "previous_refunds_count": 0
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "id": "ambiguous-plan",
+  "label": "Ambiguous — \"Can you help me with my plan?\" (human triage)",
+  "group": "refund",
+  "userInput": "Can you help me with my plan?",
+  "facts": {
+    "purchase_age_days": 30,
+    "refund_window_days": 30,
+    "account_status": "active",
+    "previous_refunds_count": 0
+  }
+}

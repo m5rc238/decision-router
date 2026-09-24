@@ -1,0 +1,12 @@
+{
+  "id": "refund-200-days",
+  "label": "Refund — Pro plan, 200 days (deny)",
+  "group": "refund",
+  "userInput": "I bought the Pro plan 200 days ago and I'd like a refund.",
+  "facts": {
+    "purchase_age_days": 200,
+    "refund_window_days": 30,
+    "account_status": "active",
+    "previous_refunds_count": 0
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "id": "failure-missing-facts",
+  "label": "Fault — No verified facts available (fail closed)",
+  "group": "failure",
+  "userInput": "I bought the Pro plan 200 days ago and I'd like a refund."
+}

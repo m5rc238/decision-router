@@ -1,0 +1,12 @@
+{
+  "id": "refund-10-days",
+  "label": "Refund — Pro plan, 10 days (approve)",
+  "group": "refund",
+  "userInput": "I subscribed to the Pro plan 10 days ago — can I get a refund?",
+  "facts": {
+    "purchase_age_days": 10,
+    "refund_window_days": 30,
+    "account_status": "active",
+    "previous_refunds_count": 0
+  }
+}
