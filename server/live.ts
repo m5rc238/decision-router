@@ -1,10 +1,11 @@
 // Vite dev-server middleware for the Decision Router live demo.
 //
 // The browser keeps the pipeline logic; this middleware is the only place
-// that talks to external services and holds credentials. Two backends:
+// that talks to external services and holds credentials. Three backends:
 //
-//   /api/live/llm   -> the local OpenCode desktop server (Big Pickle HTTP API)
-//   /api/live/jev   -> the Jev Decision API (/v1/decide)
+//   /api/live/llm      -> the local OpenCode desktop server (Big Pickle HTTP API)
+//   /api/live/jev      -> the Jev Decision API (/v1/decide)
+//   /api/live/baseline -> Google Gemini (the eval baseline models, run server-side)
 //
 // Credentials come from the environment, with a best-effort fallback to
 // .env.local / .env in the project root. Nothing secret is ever exposed to
@@ -13,6 +14,9 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Connect } from 'vite'
+import { runCoT } from '../scripts/lib/cot'
+import { runReact } from '../scripts/lib/react'
+import type { Scenario } from '../src/lib/live/types'
 
 const ENV_FILES = ['.env.local', '.env']
 
@@ -230,11 +234,15 @@ async function status(c: LiveConfig): Promise<{ ok: boolean; data: unknown }> {
     return {
       ok: true,
       data: {
-        llm: { ok: false, modelID: c.modelID, providerID: c.providerID, url: c.opencodeUrl, reason: 'password not set' },
-        jev: { ok: c.jevKey !== null, url: c.jevUrl, keyPresent: c.jevKey !== null },
+llm: { ok: false, modelID: c.modelID, providerID: c.providerID, url: c.opencodeUrl, reason: 'password not set' },
+      jev: { ok: c.jevKey !== null, url: c.jevUrl, keyPresent: c.jevKey !== null },
+      gemini: {
+        ok: typeof process.env.GEMINI_API_KEY === 'string' && process.env.GEMINI_API_KEY.length > 0,
+        model: process.env.GEMINI_MODEL ?? 'gemini-flash-lite-latest',
       },
-    }
+    },
   }
+}
   const reachable = await fetch(c.opencodeUrl + '/session?limit=1', { headers: { Authorization: basicAuth(c) } })
     .then((r) => ({ code: r.status }))
     .catch(() => ({ code: 0 }))
@@ -249,6 +257,10 @@ async function status(c: LiveConfig): Promise<{ ok: boolean; data: unknown }> {
         reachableStatus: reachable.code,
       },
       jev: { ok: c.jevKey !== null, url: c.jevUrl, keyPresent: c.jevKey !== null },
+      gemini: {
+        ok: typeof process.env.GEMINI_API_KEY === 'string' && process.env.GEMINI_API_KEY.length > 0,
+        model: process.env.GEMINI_MODEL ?? 'gemini-flash-lite-latest',
+      },
     },
   }
 }
@@ -282,6 +294,17 @@ export function liveMiddleware(): Connect.NextHandleFunction {
             return send(400, httpErr({ code: 'bad_jev_request', message: 'state and questions are required' }))
           }
           return send(200, await jevDecide(state, questions, c, model))
+        }
+        if (path === '/api/live/baseline' && req.method === 'POST') {
+          const { pipeline, scenario } = JSON.parse(await bodyOf(req)) as { pipeline?: unknown; scenario?: unknown }
+          if (pipeline !== 'cot' && pipeline !== 'react') {
+            return send(400, httpErr({ code: 'bad_baseline', message: 'pipeline must be "cot" or "react"' }))
+          }
+          if (!scenario || typeof scenario !== 'object') {
+            return send(400, httpErr({ code: 'bad_baseline', message: 'scenario object is required' }))
+          }
+          const result = pipeline === 'cot' ? await runCoT(scenario as Scenario) : await runReact(scenario as Scenario)
+          return send(200, result)
         }
         return send(404, httpErr({ code: 'not_found', message: `no live endpoint ${path}` }))
       } catch (err) {

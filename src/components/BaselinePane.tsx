@@ -2,6 +2,7 @@ import type { ReactNode } from 'react'
 import type { Scenario } from '../lib/live/types'
 import type { GoldExpectation, GoldVerdict } from '../lib/live/gold'
 import { verdictForOutcome } from '../lib/live/gold'
+import type { BaselineRunData } from '../lib/live/baseline'
 import { LAYER_CLASS } from './LayerMeta'
 import { VerdictPanel } from './BenchmarkPane'
 
@@ -13,42 +14,34 @@ function Mono({ children }: { children: ReactNode }) {
   )
 }
 
-function cotOutcomeFor(scenario: Scenario): { decision: string; reasonCode: string } {
-  const f = scenario.facts ?? {}
-  const age = f.purchase_age_days ?? 0
-  const window = f.refund_window_days ?? 30
-  const active = f.account_status === 'active'
-  const count = f.previous_refunds_count ?? 0
-
-  if (count >= 2) return { decision: 'request_review', reasonCode: 'irregular_review' }
-  if (active && age <= window) return { decision: 'approve_refund', reasonCode: 'within_refund_window' }
-  if (active) return { decision: 'deny_refund', reasonCode: 'refund_window_exceeded' }
-  return { decision: 'deny_refund', reasonCode: 'not_eligible' }
+function StatusValue({ run, running }: { run: BaselineRunData | null; running: boolean }) {
+  if (run?.outcome?.decision) return <span className="font-mono text-[11.5px] text-base-content">{run.outcome.decision}</span>
+  return <span className="text-[11px] text-base-content/45">{running ? 'running…' : '—  press Run'}</span>
 }
 
-function reactOutcomeFor(scenario: Scenario): { decision: string; reasonCode: string } {
-  const f = scenario.facts ?? {}
-  const age = f.purchase_age_days ?? 0
-  const window = f.refund_window_days ?? 30
-  const active = f.account_status === 'active'
-
-  if (active && age <= window) return { decision: 'approve_refund', reasonCode: 'within_refund_window' }
-  if (active) return { decision: 'deny_refund', reasonCode: 'refund_window_exceeded' }
-  return { decision: 'deny_refund', reasonCode: 'not_eligible' }
+function fmtMs(ms: number): string {
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)} s` : `${Math.round(ms)} ms`
 }
 
-export function CoTPane({
+function NothingToShow({ running, label }: { running: boolean; label: string }) {
+  return <p className="mt-2 text-xs text-base-content/50">{running ? `Running ${label} baseline…` : `Press Run to evaluate ${label} against gold.`}</p>
+}
+
+export function DirectLLMPane({
   scenario,
+  running,
   gold,
+  run,
 }: {
   scenario: Scenario
-  active?: number
-  running?: boolean
-  completed?: boolean
+  running: boolean
   gold: GoldExpectation
+  run: BaselineRunData | null
 }) {
-  const outcome = cotOutcomeFor(scenario)
-  const verdict: GoldVerdict = verdictForOutcome(outcome, gold)
+  const verdict: GoldVerdict | null = run?.outcome?.decision
+    ? verdictForOutcome({ decision: run.outcome.decision, reasonCode: run.outcome.reasonCode ?? '' }, gold)
+    : null
+  const tokens = run ? run.tokensIn + run.tokensOut : null
 
   return (
     <section className="card min-w-0 border border-base-300 bg-base-100 p-4 sm:p-5">
@@ -58,7 +51,7 @@ export function CoTPane({
           <span className="badge badge-sm badge-outline font-mono text-[10px]">Single-Prompt</span>
         </div>
         <p className="mt-0.5 text-xs text-base-content/60">
-          Full support record injected in 1 prompt. Model reasons and emits decision JSON + prose in a single pass.
+          Real Gemini call: full support record injected in 1 prompt. Model reasons and emits decision JSON in a single pass.
         </p>
       </header>
 
@@ -77,49 +70,52 @@ export function CoTPane({
         <li className="rounded-lg border border-base-300/70 bg-base-200/40 p-3">
           <div className="flex items-center gap-2 mb-1">
             <span className={`badge badge-sm ${LAYER_CLASS.llm}`}>STRUCTURED OUTPUT</span>
-            <span className="font-semibold text-xs font-mono text-[11px]">{outcome.decision}</span>
+            <StatusValue run={run} running={running} />
           </div>
-          <Mono>{`{ "decision": "${outcome.decision}", "reason_code": "${outcome.reasonCode}" }`}</Mono>
+          {run?.outcome?.reasonCode ? <span className="font-mono text-[10.5px] text-base-content/60">{run.outcome.reasonCode}</span> : null}
         </li>
 
         <li className="rounded-lg border border-base-300/70 bg-base-200/40 p-3">
           <div className="flex items-center gap-2 mb-1">
-            <span className={`badge badge-sm ${LAYER_CLASS.output}`}>GENERATED REPLY</span>
-            <span className="text-[10px] text-base-content/50">Single-pass prose</span>
+            <span className={`badge badge-sm ${LAYER_CLASS.output}`}>MODEL OUTPUT</span>
+            <span className="text-[10px] text-base-content/50">Single Gemini response</span>
           </div>
-          <p className="text-[12px] leading-relaxed text-base-content/80">
-            {outcome.decision === 'approve_refund'
-              ? 'Your refund request has been approved and processed according to policy.'
-              : outcome.decision === 'deny_refund'
-              ? 'We regret to inform you that your request does not meet our refund policy criteria.'
-              : 'Your case requires specialist review. We have forwarded your ticket.'}
-          </p>
+          {run ? <Mono>{run.text.slice(0, 600) || '∅'}</Mono> : null}
         </li>
       </ol>
 
+      {run?.error ? <p className="mt-2 text-xs text-error">Baseline error: {run.error}</p> : null}
+
       <div className="mt-3 flex items-center justify-between border-t border-base-300 pt-2.5 text-[11px]">
-        <span className="text-base-content/60">Mean Latency: <strong className="font-mono">1.9s</strong></span>
-        <span className="text-base-content/60">Tokens: <strong className="font-mono">527</strong></span>
+        <span className="text-base-content/60">Mean Latency: <strong className="font-mono">{run ? fmtMs(run.ms) : '—'}</strong></span>
+        <span className="text-base-content/60">Tokens: <strong className="font-mono">{tokens ?? '—'}</strong></span>
         <span className="text-base-content/60">Fail-Closed Safety: <strong className="font-mono text-error">0%</strong></span>
       </div>
 
-      <VerdictPanel title="Direct LLM Baseline vs Gold" verdict={verdict} note="Single prompt lacks structural fail-closed guardrails. Forces a decision even on broken/malformed input." />
+      {verdict ? (
+        <VerdictPanel title="Direct LLM Baseline vs Gold" verdict={verdict} note="Single prompt lacks structural fail-closed guardrails. Forces a decision even on broken/malformed input." />
+      ) : (
+        <NothingToShow running={running} label="this baseline" />
+      )}
     </section>
   )
 }
 
 export function ReActPane({
   scenario,
+  running,
   gold,
+  run,
 }: {
   scenario: Scenario
-  active?: number
-  running?: boolean
-  completed?: boolean
+  running: boolean
   gold: GoldExpectation
+  run: BaselineRunData | null
 }) {
-  const outcome = reactOutcomeFor(scenario)
-  const verdict: GoldVerdict = verdictForOutcome(outcome, gold)
+  const verdict: GoldVerdict | null = run?.outcome?.decision
+    ? verdictForOutcome({ decision: run.outcome.decision, reasonCode: run.outcome.reasonCode ?? '' }, gold)
+    : null
+  const tokens = run ? run.tokensIn + run.tokensOut : null
 
   return (
     <section className="card min-w-0 border border-base-300 bg-base-100 p-4 sm:p-5">
@@ -129,7 +125,7 @@ export function ReActPane({
           <span className="badge badge-sm badge-outline font-mono text-[10px]">Tool Calling</span>
         </div>
         <p className="mt-0.5 text-xs text-base-content/60">
-          Agent loops through thought-action steps: <code className="text-[10px]">get_support_record</code> &rarr; <code className="text-[10px]">execute_refund</code> &rarr; <code className="text-[10px]">finish</code>.
+          Real Gemini agent loop: <code className="text-[10px]">get_support_record</code> &rarr; <code className="text-[10px]">execute_refund</code> &rarr; <code className="text-[10px]">finish</code>.
         </p>
       </header>
 
@@ -145,9 +141,10 @@ export function ReActPane({
         <li className="rounded-lg border border-base-300/70 bg-base-200/40 p-3">
           <div className="flex items-center gap-2 mb-1">
             <span className={`badge badge-sm ${LAYER_CLASS.llm}`}>STEP 2 · AGENT DECISION</span>
-            <span className="font-semibold text-xs font-mono text-[11px]">{outcome.decision}</span>
+            <StatusValue run={run} running={running} />
           </div>
-          <Mono>{`action: "finish"\ndecision: "${outcome.decision}"\nreason_code: "${outcome.reasonCode}"`}</Mono>
+          {run ? <div className="mt-1 font-mono text-[10.5px] text-base-content/60">actions: {run.actions.join(' → ') || 'none'}</div> : null}
+          {run?.outcome?.reasonCode ? <div className="font-mono text-[10.5px] text-base-content/60">reason: {run.outcome.reasonCode}</div> : null}
         </li>
 
         <li className="rounded-lg border border-base-300/70 bg-base-200/40 p-3">
@@ -155,21 +152,23 @@ export function ReActPane({
             <span className={`badge badge-sm ${LAYER_CLASS.output}`}>FINAL OUTPUT</span>
             <span className="text-[10px] text-base-content/50">Agent completion</span>
           </div>
-          <p className="text-[12px] leading-relaxed text-base-content/80">
-            {outcome.decision === 'approve_refund'
-              ? 'I have verified your record and processed the refund for your account.'
-              : 'I have checked your record and your account is not eligible for an automatic refund.'}
-          </p>
+          {run ? <Mono>{run.text.slice(0, 600) || '∅'}</Mono> : null}
         </li>
       </ol>
 
+      {run?.error ? <p className="mt-2 text-xs text-error">Baseline error: {run.error}</p> : null}
+
       <div className="mt-3 flex items-center justify-between border-t border-base-300 pt-2.5 text-[11px]">
-        <span className="text-base-content/60">Mean Latency: <strong className="font-mono">1.3s</strong></span>
-        <span className="text-base-content/60">Tokens: <strong className="font-mono">869</strong></span>
+        <span className="text-base-content/60">Mean Latency: <strong className="font-mono">{run ? fmtMs(run.ms) : '—'}</strong></span>
+        <span className="text-base-content/60">Tokens: <strong className="font-mono">{tokens ?? '—'}</strong></span>
         <span className="text-base-content/60">Fail-Closed Safety: <strong className="font-mono text-error">0%</strong></span>
       </div>
 
-      <VerdictPanel title="ReAct Baseline vs Gold" verdict={verdict} note="Multi-turn tool loop experiences state drift and lacks deterministic fail-closed contracts." />
+      {verdict ? (
+        <VerdictPanel title="ReAct Baseline vs Gold" verdict={verdict} note="Multi-turn tool loop experiences state drift and lacks deterministic fail-closed contracts." />
+      ) : (
+        <NothingToShow running={running} label="this baseline" />
+      )}
     </section>
   )
 }

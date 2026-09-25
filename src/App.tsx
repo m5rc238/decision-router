@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react'
 import { SCENARIOS, findScenario } from './data/scenarios'
 import { ComposedPane } from './components/ComposedPane'
-import { CoTPane, ReActPane } from './components/BaselinePane'
+import { DirectLLMPane, ReActPane } from './components/BaselinePane'
 import { BenchmarkPane } from './components/BenchmarkPane'
 import { ResultsPage } from './components/ResultsPage'
 import { runLivePipeline, fetchStatus } from './lib/live/pipeline'
+import { runBaselineClient, type BaselineRunData } from './lib/live/baseline'
 import { goldForScenario } from './lib/live/gold'
 import { GITHUB_URL } from './config'
 import type { LiveRun } from './lib/live/types'
@@ -12,6 +13,7 @@ import type { LiveRun } from './lib/live/types'
 interface BackendStatus {
   llm: { ok: boolean; modelID: string; providerID: string; url: string; reason?: string; reachableStatus?: number }
   jev: { ok: boolean; keyPresent: boolean; url: string }
+  gemini: { ok: boolean; model: string }
 }
 
 export default function App() {
@@ -22,6 +24,11 @@ export default function App() {
   const [live, setLive] = useState<LiveRun | null>(null)
   const [phase, setPhase] = useState<'idle' | 'running' | 'finished'>('idle')
   const [status, setStatus] = useState<BackendStatus | null>(null)
+  const [baselines, setBaselines] = useState<{ direct: BaselineRunData | null; react: BaselineRunData | null }>({
+    direct: null,
+    react: null,
+  })
+  const [baselineError, setBaselineError] = useState<string | null>(null)
 
   useEffect(() => {
     const onHash = () => setRoute(window.location.hash.replace(/^#\/?/, ''))
@@ -53,24 +60,27 @@ export default function App() {
   const handleRun = () => {
     if (running) return
     const captured = scenario
+    setBaselines({ direct: null, react: null })
+    setBaselineError(null)
     setPhase('running')
-    void runLivePipeline({
-      scenario: captured,
-      onUpdate: (run) => {
+    void Promise.all([
+      runLivePipeline({ scenario: captured, onUpdate: (run) => { if (findScenario(run.scenarioId).id === captured.id) setLive(run) } }),
+      runBaselineClient('cot', captured).then((r) => setBaselines((b) => ({ ...b, direct: r }))),
+      runBaselineClient('react', captured).then((r) => setBaselines((b) => ({ ...b, react: r }))),
+    ])
+      .then(([run]) => {
         if (findScenario(run.scenarioId).id === captured.id) setLive(run)
-      },
-    }).then((run) => {
-      if (findScenario(run.scenarioId).id === captured.id) {
-        setLive(run)
-        setPhase('finished')
-      }
-    })
+      })
+      .catch((err: unknown) => setBaselineError(err instanceof Error ? err.message : String(err)))
+      .finally(() => setPhase('finished'))
   }
 
   const handleScenarioChange = (id: string) => {
     if (running) return
     setScenarioId(id)
     setLive(null)
+    setBaselines({ direct: null, react: null })
+    setBaselineError(null)
     setPhase('idle')
   }
 
@@ -157,6 +167,12 @@ export default function App() {
               >
                 {status?.jev.ok ? 'Jev connected' : 'Jev: needs JEV_API_KEY'}
               </span>
+              <span
+                className={`badge badge-sm gap-1 ${status?.gemini.ok ? 'badge-success' : 'badge-warning'}`}
+                title={`${status?.gemini.ok ? status.gemini.model : 'GEMINI_API_KEY missing — needed for the two live baselines'}`}
+              >
+                {status?.gemini.ok ? `gemini: ${status.gemini.model}` : 'gemini: needs key'}
+              </span>
             </div>
             {running && (
               <span className="font-mono text-[11px] text-base-content/50">
@@ -200,9 +216,10 @@ export default function App() {
 
       <main className="grid grid-cols-1 items-start gap-4 lg:grid-cols-3">
         <ComposedPane scenario={scenario} live={live} running={running} completed={completed} gold={gold} />
-        <CoTPane scenario={scenario} active={undefined} running={running} completed={completed} gold={gold} />
-        <ReActPane scenario={scenario} active={undefined} running={running} completed={completed} gold={gold} />
+        <DirectLLMPane scenario={scenario} running={running} gold={gold} run={baselines.direct} />
+        <ReActPane scenario={scenario} running={running} gold={gold} run={baselines.react} />
       </main>
+      {baselineError && <p className="text-xs text-error">Baseline 1/2 failed: {baselineError}</p>}
         </>
       )}
     </div>

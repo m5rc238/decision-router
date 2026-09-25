@@ -73,3 +73,8 @@ gold-labeled scenario suite. Reproduction: `npm run eval` (see `scripts/eval.ts`
   the facts domain contains none, so any occurrence would be an invented claim.
 - **Mean** (average) pipeline wall-time is reported in the table; token cost and
   per-case check details are written to `eval-results.json` (single run per scenario).
+- **Tooling mismatch (limitation).** The router's LLM stages run on Big Pickle (OpenCode,
+  local) with the Jev judge; both baselines run on Google Gemini (gemini-flash-lite-latest).
+  Scores therefore reflect architecture-plus-foundation-model, not architecture in
+  isolation. A same-model rerun would isolate the architecture effect; until then, treat
+  cross-architecture differences as implementation-and-model specific.
