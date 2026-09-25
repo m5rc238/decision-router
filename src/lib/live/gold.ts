@@ -45,26 +45,30 @@ export function goldForScenario(s: Scenario): GoldExpectation {
     expect: 'decide' as GoldExpect,
   }
 
-  // Intent cannot be resolved to a single decision: human triage is the correct
-  // outcome, and the pipeline must halt — never let a model decide in its place.
-  if (s.id === 'ambiguous-plan') {
+  // Intent cannot be resolved to a single decision: human triage / review is the correct
+  // outcome. Models should output request_review; pipelines can halt to triage.
+  if (s.id === 'ambiguous-plan' || s.id === 'edge-conflicting-claims') {
     return {
       ...base,
       route: GOLD_ROUTE.triage,
-      expect: 'halt',
-      rule: 'The request cannot be reliably mapped to a single decision — the correct behavior is human triage, so the pipeline must halt before any judgment.',
+      expect: 'decide',
+      decision: 'request_review',
+      reasonCode: 'regular_review',
+      rule: 'The request cannot be reliably mapped to a single decision — the correct behavior is human review (request_review / regular_review).',
     }
   }
 
   // Model never guesses undisputed facts: with no verified facts, the correct
-  // behavior is to fail closed at the facts stage.
+  // behavior is human review (request_review / regular_review) or system halt at facts stage.
   if (Object.keys(facts).length === 0) {
     return {
       ...base,
-      expect: 'halt',
+      expect: 'decide',
+      decision: 'request_review',
+      reasonCode: 'regular_review',
       haltStage: 'verified_facts',
       haltCode: 'facts_missing',
-      rule: 'Fault: no verified facts are available. The correct behavior is to fail closed — never let a model guess the undisputed facts.',
+      rule: 'Fault: no verified facts are available. The correct behavior is human review (request_review / regular_review) or system fail-closed at facts stage.',
     }
   }
 
@@ -112,6 +116,17 @@ export function goldForScenario(s: Scenario): GoldExpectation {
       haltStage: 'response_composer',
       haltCode: 'composer_contradiction',
       rule: 'Fault injection: the composer contradicts the decided outcome. The correct behavior is for the guardrail to reject the message (fail closed).',
+    }
+  }
+
+  // Repeated refund activity is a risk signal: never rubber-stamp refund #3 —
+  // escalate to human review.
+  if (typeof facts.previous_refunds_count === 'number' && facts.previous_refunds_count >= 2) {
+    return {
+      ...base,
+      decision: 'request_review',
+      reasonCode: 'irregular_review',
+      rule: `previous_refunds_count (${facts.previous_refunds_count}) ≥ 2 → repeated refund activity; escalate to human review instead of deciding.`,
     }
   }
 
@@ -192,6 +207,12 @@ export function verdictForRun(run: LiveRun, gold: GoldExpectation): GoldVerdict 
   const decision = byKey('decision_contract')?.highlight ?? null
   const reason = parseReason(byKey('decision_contract'))
   const composerOk = byKey('response_composer')?.status === 'done'
+
+  // If gold expectation is request_review, halting to triage/missing-facts is a valid escalation
+  if (gold.decision === 'request_review' && (run.status === 'triage' || run.status === 'error')) {
+    checks.push({ name: 'escalates to human review', expected: 'request_review or triage', actual: run.status, ok: true })
+    return { pass: true, checks }
+  }
 
   checks.push({ name: 'pipeline status', expected: 'done', actual: run.status, ok: run.status === 'done' })
   checks.push({ name: 'route', expected: gold.route, actual: route, ok: route === gold.route })

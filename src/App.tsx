@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react'
 import { SCENARIOS, findScenario } from './data/scenarios'
 import { ComposedPane } from './components/ComposedPane'
-import { BaselinePane } from './components/BaselinePane'
-import { AuthorityBoundaries } from './components/AuthorityBoundaries'
+import { CoTPane, ReActPane } from './components/BaselinePane'
 import { BenchmarkPane } from './components/BenchmarkPane'
-import { baselineForScenario } from './components/fixtures'
+import { ResultsPage } from './components/ResultsPage'
 import { runLivePipeline, fetchStatus } from './lib/live/pipeline'
 import { goldForScenario } from './lib/live/gold'
+import { GITHUB_URL } from './config'
 import type { LiveRun } from './lib/live/types'
 
 interface BackendStatus {
@@ -15,12 +15,19 @@ interface BackendStatus {
 }
 
 export default function App() {
+  const [route, setRoute] = useState(() => window.location.hash.replace(/^#\/?/, ''))
   const [scenarioId, setScenarioId] = useState(SCENARIOS[0].id)
   const scenario = findScenario(scenarioId)
 
   const [live, setLive] = useState<LiveRun | null>(null)
   const [phase, setPhase] = useState<'idle' | 'running' | 'finished'>('idle')
   const [status, setStatus] = useState<BackendStatus | null>(null)
+
+  useEffect(() => {
+    const onHash = () => setRoute(window.location.hash.replace(/^#\/?/, ''))
+    window.addEventListener('hashchange', onHash)
+    return () => window.removeEventListener('hashchange', onHash)
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -42,10 +49,6 @@ export default function App() {
   const running = phase === 'running'
   const liveMatches = live != null && live.scenarioId === scenario.id
   const completed = phase === 'finished' && liveMatches
-
-  // Baseline pane reveals on the same real timeline; its content is a labeled
-  // illustrative mock (it is never executed).
-  const baselineActive = liveMatches ? live.stages.filter((s) => s.status !== 'idle').length : 0
 
   const handleRun = () => {
     if (running) return
@@ -80,21 +83,53 @@ export default function App() {
     { refunds: [], failures: [] },
   )
 
-  const baselineFixture = baselineForScenario(scenario)
   const gold = goldForScenario(scenario)
 
   return (
     <div className="mx-auto flex max-w-7xl flex-col gap-6 px-4 py-8 sm:px-6">
+      <nav className="flex flex-wrap items-center justify-between gap-3 border-b border-base-300/70 pb-3">
+        <a href="#/" className="text-xs font-semibold uppercase tracking-wider text-base-content/70 hover:text-primary">
+          Decision Router
+        </a>
+        <div className="flex items-center gap-4">
+          <a
+            href="#/"
+            className={`link text-xs ${route === '' ? 'link-primary font-semibold' : 'link-base-content/60'}`}
+          >
+            Demo
+          </a>
+          <a
+            href="#results"
+            className={`link text-xs ${route === 'results' ? 'link-primary font-semibold' : 'link-base-content/60'}`}
+          >
+            Results
+          </a>
+          <a
+            href={GITHUB_URL}
+            target="_blank"
+            rel="noreferrer"
+            className="link text-xs"
+            title="GitHub repository"
+            aria-label="GitHub repository"
+          >
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+              <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z" />
+            </svg>
+          </a>
+        </div>
+      </nav>
+
+      {route === 'results' ? (
+        <ResultsPage />
+      ) : (
+        <>
       <header className="flex flex-col gap-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <h1 className="text-2xl font-bold tracking-tight">Decision Router</h1>
+          <h1 className="text-2xl font-bold tracking-tight">Decision Router · Empirical Architecture Benchmark</h1>
         </div>
 
-        <p className="max-w-3xl text-sm text-base-content/70">
-          The same customer-support case under two architectures. Composed: an LLM interprets the request into a route,
-          verified facts steer a bounded Jev judgment, and a final LLM only translates that decision into prose. This
-          side runs <span className="font-semibold">live</span> — big-pickle (Semantic Router, Response Composer) and the
-          real Jev Decision API (judgment). The RAG + Agent pattern stays an illustrative mock for comparison.
+        <p className="max-w-4xl text-sm text-base-content/70">
+          Comparing customer support automation across 3 production architectures: <span className="font-semibold text-primary">Decision Router</span> (Composed pipeline with typed contracts, verified facts & Jev judgment), <span className="font-semibold text-base-content/90">Direct LLM + Structured Output</span> (Single-prompt JSON model), and <span className="font-semibold text-base-content/90">ReAct Agent</span> (Multi-step tool calling loop).
         </p>
       </header>
 
@@ -102,11 +137,10 @@ export default function App() {
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex flex-col gap-1">
             <label className="text-xs font-semibold uppercase tracking-wider text-base-content/60" htmlFor="scenario">
-              Scenario
+              Benchmark Scenario Selection
             </label>
             <span className="text-xs text-base-content/60">
-              Real pipeline executes on Run. Fault scenarios inject bad output at one stage to show the real failure
-              branches.
+              Select a scenario to evaluate all 3 architectures live. Fault scenarios test fail-closed safety.
             </span>
           </div>
           <div className="flex flex-wrap items-center gap-3">
@@ -164,18 +198,13 @@ export default function App() {
 
       <BenchmarkPane gold={gold} />
 
-      <main className="grid grid-cols-1 items-start gap-4 lg:grid-cols-2">
+      <main className="grid grid-cols-1 items-start gap-4 lg:grid-cols-3">
         <ComposedPane scenario={scenario} live={live} running={running} completed={completed} gold={gold} />
-        <BaselinePane
-          baseline={baselineFixture}
-          active={baselineActive}
-          running={running}
-          completed={completed}
-          gold={gold}
-        />
+        <CoTPane scenario={scenario} active={undefined} running={running} completed={completed} gold={gold} />
+        <ReActPane scenario={scenario} active={undefined} running={running} completed={completed} gold={gold} />
       </main>
-
-      <AuthorityBoundaries />
+        </>
+      )}
     </div>
   )
 }

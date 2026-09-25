@@ -67,35 +67,38 @@ function ReferenceStat({ label, value, tone }: { label: string; value: ReactNode
 export function BenchmarkPane({ gold }: { gold: GoldExpectation }) {
   const halt = gold.expect === 'halt'
   const decisionTone = gold.decision === 'approve_refund' ? 'ok' : gold.decision === 'deny_refund' ? 'warn' : 'info'
+
   return (
-    <section className="card border border-base-300 bg-base-100 p-4">
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        <h2 className="text-sm font-semibold uppercase tracking-wider text-base-content/70">
-          Benchmark · Gold reference
-        </h2>
-        <span className="badge badge-sm badge-outline">spec-derived</span>
-        <span className="ml-auto max-w-[45%] truncate text-right text-xs text-base-content/50" title={gold.label}>
-          {gold.label}
-        </span>
-      </div>
-      <p className="mt-1 max-w-3xl text-xs text-base-content/60">
-        The ideal answer for this case, derived from the business rules baked into the fixtures — the same rule set the
-        live judge is told. Each run is checked against it; the PASS/MISMATCH verdict appears at the bottom of each
-        pipeline.
-      </p>
-      <dl className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
-        <ReferenceStat label="Route" value={gold.route} tone="info" />
-        <ReferenceStat
-          label={halt ? 'Expected behavior' : 'Expected decision'}
-          value={halt ? 'no decision — halt' : gold.decision}
-          tone={halt ? 'warn' : decisionTone}
-        />
-        <ReferenceStat
-          label={halt ? 'Halt at' : 'Expected reason'}
-          value={halt ? gold.haltStage ?? 'human triage' : gold.reasonCode}
-        />
-      </dl>
-      <p className="mt-2 text-xs leading-relaxed text-base-content/55">{gold.rule}</p>
-    </section>
+    <div className="flex flex-col gap-4">
+      {/* Current Scenario Gold Spec */}
+      <section className="card border border-base-300 bg-base-100 p-4">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+          <h2 className="text-sm font-semibold uppercase tracking-wider text-base-content/70">
+            Current Scenario · Gold Specification
+          </h2>
+          <span className="badge badge-sm badge-outline">spec-derived</span>
+          <span className="ml-auto max-w-[45%] truncate text-right text-xs text-base-content/50" title={gold.label}>
+            {gold.label}
+          </span>
+        </div>
+        <p className="mt-1 max-w-3xl text-xs text-base-content/60">
+          The ideal answer for this case, derived from the business rules baked into the fixtures — the same rule set the
+          live judge is told.
+        </p>
+        <dl className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+          <ReferenceStat label="Route" value={gold.route} tone="info" />
+          <ReferenceStat
+            label={halt ? 'Expected behavior' : 'Expected decision'}
+            value={halt ? 'no decision — halt' : gold.decision}
+            tone={halt ? 'warn' : decisionTone}
+          />
+          <ReferenceStat
+            label={halt ? 'Halt at' : 'Expected reason'}
+            value={halt ? gold.haltStage ?? 'human triage' : gold.reasonCode}
+          />
+        </dl>
+        <p className="mt-2 text-xs leading-relaxed text-base-content/55">{gold.rule}</p>
+      </section>
+    </div>
   )
 }

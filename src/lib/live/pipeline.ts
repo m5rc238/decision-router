@@ -70,10 +70,17 @@ export const STAGE_LAYER: Record<StageKey, Layer> = {
 }
 
 // ---------------------------------------------------------------------------
-// Fetch helpers (same-origin dev middleware)
+// Fetch helpers (same-origin dev middleware). In the browser the base stays
+// empty (same-origin). Eval scripts on Node can point it at a running dev
+// server with setLiveApiBase() so the SAME pipeline runs headlessly.
+let API_BASE = ''
+
+export function setLiveApiBase(base: string): void {
+  API_BASE = base.replace(/\/$/, '')
+}
 
 async function postJson<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(path, {
+  const res = await fetch(API_BASE + path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -86,7 +93,7 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
 }
 
 export async function fetchStatus(): Promise<{ llm: unknown; jev: unknown }> {
-  const res = await fetch('/api/live/status')
+  const res = await fetch(API_BASE + '/api/live/status')
   const data = (await res.json()) as { data: { llm: unknown; jev: unknown } }
   return data.data
 }
@@ -186,11 +193,11 @@ function jevQuestions(): Record<string, unknown> {
     refund_decision: {
       type: 'choice',
       instructions:
-        'Given the verified_facts and the applicable refund policy, decide this refund request. Approve only when purchase_age_days is at or below refund_window_days and the account is active. Deny when purchase_age_days exceeds refund_window_days. Ask for review only when the facts are ambiguous, incomplete or irregular.',
+        'Given the verified_facts and the applicable refund policy, decide this refund request. Approve when purchase_age_days is at or below refund_window_days AND account_status is active AND there have not been multiple prior refunds. Deny when purchase_age_days exceeds refund_window_days (refund_window_exceeded) or the account is not active (not_eligible). A non-active account is NOT an ambiguous case — deny it. Ask for review ONLY when the case is genuinely irregular: two or more previous refunds (previous_refunds_count >= 2), or facts that are ambiguous or incomplete.',
       criteria: {
-        approve_refund: 'purchase_age_days <= refund_window_days and account_status is active',
-        deny_refund: 'purchase_age_days > refund_window_days (refund_window_exceeded)',
-        request_review: 'facts are ambiguous, incomplete, or irregular',
+        approve_refund: 'purchase_age_days <= refund_window_days and account_status is active and previous_refunds_count < 2',
+        deny_refund: 'purchase_age_days > refund_window_days (refund_window_exceeded) OR account_status is not active (not_eligible)',
+        request_review: 'previous_refunds_count >= 2, or facts are ambiguous or incomplete — a specialist must review',
       },
     },
     reason_code: {
@@ -200,7 +207,7 @@ function jevQuestions(): Record<string, unknown> {
         within_refund_window: 'purchase_age_days <= refund_window_days',
         refund_window_exceeded: 'purchase_age_days > refund_window_days',
         not_eligible: 'account not active or otherwise ineligible',
-        irregular_review: 'irregular or ambiguous facts require a specialist',
+        irregular_review: 'previous_refunds_count >= 2 (repeated refund activity), or irregular/ambiguous facts require a specialist',
       },
     },
   }
