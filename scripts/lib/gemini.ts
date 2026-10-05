@@ -11,6 +11,10 @@ export interface GeminiResult {
   text: string
   ms: number
   tokens: GeminiTokens
+  /** modelVersion reported by the API (e.g. gemini-2.0-flash-lite-001). */
+  modelVersion?: string
+  /** temperature actually sent in generationConfig (recorded per run, Task 4). */
+  temperature?: number
 }
 
 export class GeminiError extends Error {
@@ -44,9 +48,12 @@ export async function callGemini(opts: {
   const key = process.env.GEMINI_API_KEY
   if (!key) throw new GeminiError('GEMINI_API_KEY is not set (put it in .env.local). The baselines never fake a model.', 401)
   const model = geminiModel()
+  // Explicit temperature so it can be RECORDED per run (Task 4). Default 0.7 is
+  // the documented standard for the flash-lite family; override via GEMINI_TEMPERATURE.
+  const temperature = Number(process.env.GEMINI_TEMPERATURE ?? 0.7)
   const body: Record<string, unknown> = {
     contents: [{ role: 'user', parts: [{ text: prompt }] }],
-    generationConfig: { maxOutputTokens, ...(json ? { responseMimeType: 'application/json' } : {}) },
+    generationConfig: { maxOutputTokens, temperature, ...(json ? { responseMimeType: 'application/json' } : {}) },
   }
   if (system) body.system_instruction = { parts: [{ text: system }] }
 
@@ -100,6 +107,8 @@ export async function callGemini(opts: {
     return {
       text: textOut,
       ms,
+      modelVersion: typeof data?.modelVersion === 'string' ? data.modelVersion : undefined,
+      temperature,
       tokens: { input: usage?.promptTokenCount, output: usage?.candidatesTokenCount },
     }
   }

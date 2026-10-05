@@ -10,7 +10,7 @@ import { VerdictPanel } from './BenchmarkPane'
 function Mono({ children, dim = false }: { children: ReactNode; dim?: boolean }) {
   return (
     <pre
-      className={`whitespace-pre-wrap font-mono text-[11px] leading-relaxed ${
+      className={`whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed ${
         dim ? 'text-base-content/55' : 'text-base-content/80'
       }`}
     >
@@ -204,7 +204,7 @@ function stageBody(stage: LiveStage, scenario: Scenario): ReactNode {
             <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--dr-llm)]">
               Composer output · big-pickle
             </span>
-            <p className="mt-1.5 whitespace-pre-wrap text-[13px] leading-relaxed">{stage.output}</p>
+            <p className="mt-1.5 whitespace-pre-wrap break-words text-[13px] leading-relaxed">{stage.output}</p>
           </div>
         </div>
       )
@@ -214,7 +214,7 @@ function stageBody(stage: LiveStage, scenario: Scenario): ReactNode {
           <span className="text-[10px] font-bold uppercase tracking-wider text-base-content/50">
             Final email · written by the Response Composer (big-pickle)
           </span>
-          <p className="mt-1.5 whitespace-pre-wrap text-[13px] font-medium leading-relaxed">{stage.output}</p>
+          <p className="mt-1.5 whitespace-pre-wrap break-words text-[13px] font-medium leading-relaxed">{stage.output}</p>
         </div>
       )
     default:

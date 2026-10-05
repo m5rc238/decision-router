@@ -8,7 +8,7 @@ import { VerdictPanel } from './BenchmarkPane'
 
 function Mono({ children }: { children: ReactNode }) {
   return (
-    <pre className="whitespace-pre-wrap font-mono text-[11.5px] leading-relaxed text-base-content/80">
+    <pre className="whitespace-pre-wrap break-words font-mono text-[11.5px] leading-relaxed text-base-content/80">
       {children}
     </pre>
   )

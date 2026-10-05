@@ -8,12 +8,15 @@ export interface BaselineOutcome {
   reasonCode: string | null
 }
 
-export type PipelineKey = 'cot' | 'react' | 'router'
+export type PipelineKey = 'cot' | 'react' | 'router' | 'direct_validator'
 
 export interface RunMetrics {
   pipeline: PipelineKey
   scenarioId: string
   repeat: number
+  model?: string
+  modelVersion?: string
+  temperature?: number
   decision: string | null
   reasonCode: string | null
   halted: boolean

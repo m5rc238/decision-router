@@ -1,18 +1,14 @@
 // A small, dependency-free markdown renderer for the subset of CommonMark used
-// by the project docs (eval_results_summary.md): ATX headings, ordered/unordered
-// lists, pipe tables, fenced code, blockquotes, horizontal rules, **bold**,
-// *italic* and `inline code`. Everything is HTML-escaped first.
+// by the project docs: ATX headings, ordered/unordered lists, pipe tables,
+// fenced code, blockquotes, horizontal rules, **bold**, *italic* and
+// `inline code`. Output is ReactNode text, so React auto-escapes everything.
 
 import type { ReactNode } from 'react'
-
-function escapeHtml(text: string): string {
-  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-}
 
 const INLINE_RX = /(\*\*[^*]+\*\*|`[^`]+`|\*[^*]+\*)/g
 
 function inline(text: string): ReactNode[] {
-  const safe = escapeHtml(text)
+  const safe = text
   const nodes: ReactNode[] = []
   let last = 0
   for (const m of safe.matchAll(INLINE_RX)) {
@@ -82,7 +78,7 @@ function renderMarkdown(md: string): ReactNode {
       i++ // closing fence
       out.push(
         <pre key={out.length} className="my-2 overflow-x-auto rounded-lg border border-base-300 bg-base-200/50 px-3 py-2 font-mono text-[11px] leading-relaxed">
-          <code>{escapeHtml(buf.join('\n'))}</code>
+          <code>{buf.join('\n')}</code>
         </pre>,
       )
       continue

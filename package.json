@@ -8,7 +8,8 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "eval": "tsx scripts/eval.ts"
+    "eval": "tsx scripts/eval.ts",
+    "fault-eval": "tsx scripts/fault-eval.ts"
   },
   "dependencies": {
     "daisyui": "^5.7.43",

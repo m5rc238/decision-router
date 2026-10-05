@@ -24,9 +24,11 @@ export interface CliArgs {
   repeat: number
   out: string
   liveBase?: string
+  model: 'gemini' | 'opencode'
   concurrency: number
   limit?: number
   quiet: boolean
+  variations: boolean
 }
 
 export function parseArgs(argv: string[]): CliArgs {
@@ -35,8 +37,10 @@ export function parseArgs(argv: string[]): CliArgs {
     ids: [],
     repeat: 1,
     out: 'eval-results.json',
+    model: 'gemini',
     concurrency: 1,
     quiet: false,
+    variations: false,
   }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
@@ -55,6 +59,16 @@ export function parseArgs(argv: string[]): CliArgs {
         break
       case '--live-base':
         args.liveBase = argv[++i]
+        break
+      case '--model':
+        {
+          const m = argv[++i]
+          if (m !== 'gemini' && m !== 'opencode') throw new Error(`--model must be gemini or opencode (got ${m})`)
+          args.model = m
+        }
+        break
+      case '--variations':
+        args.variations = true
         break
       case '--concurrency':
         args.concurrency = Number(argv[++i]) || 2
