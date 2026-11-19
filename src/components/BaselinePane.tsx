@@ -38,8 +38,15 @@ export function DirectLLMPane({
   gold: GoldExpectation
   run: BaselineRunData | null
 }) {
-  const verdict: GoldVerdict | null = run?.outcome?.decision
-    ? verdictForOutcome({ decision: run.outcome.decision, reasonCode: run.outcome.reasonCode ?? '' }, gold)
+  const verdict: GoldVerdict | null = run
+    ? verdictForOutcome(
+        {
+          decision: run.outcome?.decision ?? null,
+          reasonCode: run.outcome?.reasonCode ?? '',
+          serviceError: run.error ?? null,
+        },
+        gold,
+      )
     : null
   const tokens = run ? run.tokensIn + run.tokensOut : null
 
@@ -87,9 +94,14 @@ export function DirectLLMPane({
       {run?.error ? <p className="mt-2 text-xs text-error">Baseline error: {run.error}</p> : null}
 
       <div className="mt-3 flex items-center justify-between border-t border-base-300 pt-2.5 text-[11px]">
-        <span className="text-base-content/60">Mean Latency: <strong className="font-mono">{run ? fmtMs(run.ms) : '—'}</strong></span>
+        <span className="text-base-content/60">Latency: <strong className="font-mono">{run ? fmtMs(run.ms) : '—'}</strong></span>
         <span className="text-base-content/60">Tokens: <strong className="font-mono">{tokens ?? '—'}</strong></span>
-        <span className="text-base-content/60">Fail-Closed Safety: <strong className="font-mono text-error">0%</strong></span>
+        <span className="text-base-content/60">
+          Verdict:{' '}
+          <strong className={`font-mono ${verdict ? (verdict.pass ? 'text-success' : 'text-error') : ''}`}>
+            {verdict ? verdict.classification : '—'}
+          </strong>
+        </span>
       </div>
 
       {verdict ? (
@@ -112,8 +124,15 @@ export function ReActPane({
   gold: GoldExpectation
   run: BaselineRunData | null
 }) {
-  const verdict: GoldVerdict | null = run?.outcome?.decision
-    ? verdictForOutcome({ decision: run.outcome.decision, reasonCode: run.outcome.reasonCode ?? '' }, gold)
+  const verdict: GoldVerdict | null = run
+    ? verdictForOutcome(
+        {
+          decision: run.outcome?.decision ?? null,
+          reasonCode: run.outcome?.reasonCode ?? '',
+          serviceError: run.error ?? null,
+        },
+        gold,
+      )
     : null
   const tokens = run ? run.tokensIn + run.tokensOut : null
 
@@ -159,9 +178,14 @@ export function ReActPane({
       {run?.error ? <p className="mt-2 text-xs text-error">Baseline error: {run.error}</p> : null}
 
       <div className="mt-3 flex items-center justify-between border-t border-base-300 pt-2.5 text-[11px]">
-        <span className="text-base-content/60">Mean Latency: <strong className="font-mono">{run ? fmtMs(run.ms) : '—'}</strong></span>
+        <span className="text-base-content/60">Latency: <strong className="font-mono">{run ? fmtMs(run.ms) : '—'}</strong></span>
         <span className="text-base-content/60">Tokens: <strong className="font-mono">{tokens ?? '—'}</strong></span>
-        <span className="text-base-content/60">Fail-Closed Safety: <strong className="font-mono text-error">0%</strong></span>
+        <span className="text-base-content/60">
+          Verdict:{' '}
+          <strong className={`font-mono ${verdict ? (verdict.pass ? 'text-success' : 'text-error') : ''}`}>
+            {verdict ? verdict.classification : '—'}
+          </strong>
+        </span>
       </div>
 
       {verdict ? (

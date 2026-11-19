@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { SCENARIOS, findScenario } from './data/scenarios'
 import { ComposedPane } from './components/ComposedPane'
 import { DirectLLMPane, ReActPane } from './components/BaselinePane'
@@ -29,6 +29,7 @@ export default function App() {
     react: null,
   })
   const [baselineError, setBaselineError] = useState<string | null>(null)
+  const runAbortRef = useRef<AbortController | null>(null)
 
   useEffect(() => {
     const onHash = () => setRoute(window.location.hash.replace(/^#\/?/, ''))
@@ -59,17 +60,26 @@ export default function App() {
 
   const handleRun = () => {
     if (running) return
+    runAbortRef.current?.abort()
+    const controller = new AbortController()
+    runAbortRef.current = controller
     const captured = scenario
     setBaselines({ direct: null, react: null })
     setBaselineError(null)
     setPhase('running')
     void Promise.all([
-      runLivePipeline({ scenario: captured, onUpdate: (run) => { if (findScenario(run.scenarioId).id === captured.id) setLive(run) } }),
+      runLivePipeline({
+        scenario: captured,
+        signal: controller.signal,
+        onUpdate: (run) => {
+          if (!controller.signal.aborted && findScenario(run.scenarioId).id === captured.id) setLive(run)
+        },
+      }),
       runBaselineClient('cot', captured).then((r) => setBaselines((b) => ({ ...b, direct: r }))),
       runBaselineClient('react', captured).then((r) => setBaselines((b) => ({ ...b, react: r }))),
     ])
       .then(([run]) => {
-        if (findScenario(run.scenarioId).id === captured.id) setLive(run)
+        if (!controller.signal.aborted && findScenario(run.scenarioId).id === captured.id) setLive(run)
       })
       .catch((err: unknown) => setBaselineError(err instanceof Error ? err.message : String(err)))
       .finally(() => setPhase('finished'))
@@ -77,6 +87,7 @@ export default function App() {
 
   const handleScenarioChange = (id: string) => {
     if (running) return
+    runAbortRef.current?.abort()
     setScenarioId(id)
     setLive(null)
     setBaselines({ direct: null, react: null })

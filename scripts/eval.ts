@@ -1,22 +1,29 @@
-// Research eval: compare the Decision Router (live) against a Direct LLM +
-// Structured Output baseline and a ReAct tool-calling agent on the gold-labeled
-// scenario set.
+// Research eval: compare the Decision Router (live) against Direct-LLM,
+// Direct+validator, and ReAct on the gold-labeled scenario set.
 //
-//   npm run eval -- --pipelines cot,react,router --live-base http://localhost:5199 --repeat 3
+//   npm run eval -- --pipelines cot,direct_validator,react,router --live-base http://localhost:5199 --repeat 3
 //
-// Metrics per pipeline over gold-labeled runs:
-//   - decision accuracy    (gold=decide cases only; exact decision+reason match)
-//   - halt correctness     (gold=halt cases only; baseline false-decides → 0)
-//   - fabricated value rate (amounts/dates invented — the facts domain has none)
-//   - illegal action rate  (ReAct: execute_refund when gold forbids it)
-//   - consistency          (agreement across repeats within a scenario)
-// Latency is reported as the MEAN pipeline wall-time across runs.
-// Output: a human table on stdout and results.json.
+// Grader v2 fixes:
+//   - Common outcome pass/fail (`outcomePass`) is separated from router-specific
+//     stage checks (`stagePass`).
+//   - Arbitrary upstream API errors never count as valid halts or escalations.
+//   - Baselines receive baseline-applicable fault payloads (`injectFault`) when
+//     evaluating fault scenarios; component-specific outages (`jev-500`) are
+//     marked `applicable: false` for baselines and reported separately.
+//   - Full router stage traces (`stages`, `runStatus`, `haltStage`, `haltCode`)
+//     are persisted per run so results can be independently re-scored offline.
 
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import type { LiveRun, Scenario } from '../src/lib/live/types'
-import { goldForScenario, verdictForOutcome, verdictForRun } from '../src/lib/live/gold'
+import {
+  goldForScenario,
+  GRADER_VERSION,
+  verdictForOutcome,
+  verdictForRun,
+  type GoldExpectation,
+  type SavedStageTrace,
+} from '../src/lib/live/gold'
 import { runLivePipeline, setLiveApiBase } from '../src/lib/live/pipeline'
 import { loadEnvLocal } from './lib/env'
 import { benchmarkScenarioSet } from './lib/scenarios'
@@ -24,7 +31,13 @@ import { hasFabricatedValue } from './lib/fabrication'
 import { fmt, parseArgs } from './lib/parse'
 import { runCoT } from './lib/cot'
 import { runReact } from './lib/react'
-import { validateDirectModel, applyValidator } from './lib/validator'
+import {
+  applyValidator,
+  validateDirectModel,
+  VALIDATOR_V2_1_VERSION,
+} from './lib/validator'
+import { faultApplicable, faultPayload } from './lib/faults'
+import { runDeterministicPolicy } from './lib/rules'
 import { MODEL_LABEL, type ModelKey } from './lib/llm'
 import { expandWithParaphrases, goldScenarioFor, baseOfId } from './lib/paraphrases'
 import { wilson95, fmtWilson } from './lib/stats'
@@ -56,7 +69,21 @@ function reasonFromOutput(output: string | undefined): string | null {
   return m ? m[1] : output.match(/"reason_code"\s*:\s*"([^"]+)"/)?.[1] ?? null
 }
 
-async function runRouter(scenario: Scenario): Promise<RunMetrics> {
+function summarizeStages(run: LiveRun): SavedStageTrace[] {
+  return run.stages.map((s) => ({
+    key: s.key,
+    status: s.status,
+    ...(s.highlight !== undefined ? { highlight: s.highlight } : {}),
+    ...(s.output !== undefined ? { output: s.output } : {}),
+    ...(s.error !== undefined ? { error: s.error } : {}),
+    ...(s.errorCode !== undefined ? { errorCode: s.errorCode } : {}),
+    ...(s.ms !== undefined ? { ms: s.ms } : {}),
+    ...(s.faulted !== undefined ? { faulted: s.faulted } : {}),
+  }))
+}
+
+async function runRouter(scenario: Scenario, repeat: number): Promise<RunMetrics> {
+  const gold = goldForScenario(goldScenarioFor(scenario, allById))
   let run: LiveRun | undefined
   const started = Date.now()
   try {
@@ -64,14 +91,34 @@ async function runRouter(scenario: Scenario): Promise<RunMetrics> {
   } catch (err) {
     const ms = Date.now() - started
     return {
-      pipeline: 'router', scenarioId: scenario.id, repeat: 0, model: MODEL_LABEL.opencode, decision: null, reasonCode: null,
-      halted: true, pass: false, ms, tokensIn: 0, tokensOut: 0, fabricated: false,
-      illegalAction: false, actions: [], error: err instanceof Error ? err.message : String(err),
+      pipeline: 'router',
+      scenarioId: scenario.id,
+      repeat,
+      model: MODEL_LABEL.opencode,
+      decision: null,
+      reasonCode: null,
+      halted: true,
+      pass: false,
+      outcomePass: false,
+      stagePass: false,
+      expectedOutcome: gold.expectedOutcome,
+      observedOutcome: 'service_error',
+      verdictClassification: 'unrelated_service_error',
+      ms,
+      tokensIn: 0,
+      tokensOut: 0,
+      fabricated: false,
+      illegalAction: false,
+      actions: [],
+      faultInjected: Boolean(scenario.fault),
+      applicable: true,
+      error: err instanceof Error ? err.message : String(err),
     }
   }
-  const gold = goldForScenario(goldScenarioFor(scenario, allById))
   const verdict = verdictForRun(run, gold)
   const decisionCard = run.stages.find((s) => s.key === 'decision_contract')
+  const routeCard = run.stages.find((s) => s.key === 'route_contract')
+  const failedStage = run.stages.find((s) => s.status === 'error')
   const composer = run.stages.find((s) => s.key === 'response_composer')
   const tokensIn = run.stages.reduce((n, s) => n + (s.tokens?.input ?? 0), 0)
   const tokensOut = run.stages.reduce((n, s) => n + (s.tokens?.output ?? 0), 0)
@@ -79,67 +126,181 @@ async function runRouter(scenario: Scenario): Promise<RunMetrics> {
   return {
     pipeline: 'router',
     scenarioId: scenario.id,
-    repeat: 0,
+    repeat,
     model: MODEL_LABEL.opencode,
     decision: decisionCard?.highlight ?? null,
     reasonCode: reasonFromOutput(decisionCard?.output),
     halted: run.status === 'error' || run.status === 'triage',
     pass: verdict.pass,
+    outcomePass: verdict.outcomePass,
+    stagePass: verdict.stagePass,
+    expectedOutcome: verdict.expectedOutcome,
+    observedOutcome: verdict.observedOutcome,
+    verdictClassification: verdict.classification,
+    runStatus: run.status,
+    route: routeCard?.highlight ?? null,
+    haltStage: failedStage?.key ?? (run.status === 'triage' ? 'route_contract' : null),
+    haltCode: failedStage?.errorCode ?? (run.status === 'triage' ? 'human_triage' : null),
+    stages: summarizeStages(run),
     ms: run.totalMs,
     tokensIn,
     tokensOut,
     fabricated: hasFabricatedValue(scanned),
     illegalAction: false,
     actions: run.note ? [`note:${run.note}`] : [],
+    faultInjected: Boolean(scenario.fault),
+    applicable: true,
   }
-}
-
-function verdictForBaseline(decision: string, reasonCode: string | null, gold: { expect: 'decide' | 'halt' }) {
-  // A baseline arm that halts is correct only when gold expects a halt.
-  if (decision === 'halt') {
-    return gold.expect === 'halt' ? { pass: true } : { pass: false }
-  }
-  return verdictForOutcome({ decision, reasonCode: reasonCode ?? '' }, gold as ReturnType<typeof goldForScenario>)
 }
 
 async function runBaseline(pipeline: PipelineKey, scenario: Scenario, repeat: number): Promise<RunMetrics> {
   const modelKey: ModelKey = args.model
-  const gold = goldForScenario(goldScenarioFor(scenario, allById))
-  let outcome: { decision: string | null; reasonCode: string | null }
+  const baseScenario = goldScenarioFor(scenario, allById)
+  const gold: GoldExpectation = goldForScenario(baseScenario)
+  const faultKind = scenario.fault?.kind
+  const applicable = faultKind ? faultApplicable(faultKind, 'baseline') : true
+  const injectFault = faultKind && applicable ? faultKind : undefined
+
+  if (pipeline === 'rules_only') {
+    const serviceOutputs = injectFault
+      ? [{ stage: scenario.fault?.stage ?? ('untagged' as const), payload: faultPayload(injectFault) }]
+      : undefined
+    const res = runDeterministicPolicy(scenario, { serviceOutputs })
+    const verdict = verdictForOutcome(
+      {
+        decision: res.outcome.decision,
+        reasonCode: res.outcome.reasonCode,
+        halted: res.halted,
+        validatorReason: res.reason,
+      },
+      gold,
+    )
+    return {
+      pipeline,
+      scenarioId: scenario.id,
+      repeat,
+      model: 'Deterministic TS Rules',
+      decision: res.outcome.decision,
+      reasonCode: res.outcome.reasonCode,
+      halted: res.halted,
+      pass: verdict.pass,
+      outcomePass: verdict.outcomePass,
+      stagePass: verdict.stagePass,
+      expectedOutcome: verdict.expectedOutcome,
+      observedOutcome: verdict.observedOutcome,
+      verdictClassification: verdict.classification,
+      ms: res.ms,
+      tokensIn: 0,
+      tokensOut: 0,
+      fabricated: false,
+      illegalAction: false,
+      actions: [],
+      faultInjected: Boolean(injectFault),
+      applicable,
+    }
+  }
+
   if (pipeline === 'cot') {
-    const r = await runCoT(scenario, { model: modelKey })
-    outcome = r.outcome
-    const verdict = verdictForBaseline(outcome.decision ?? '', outcome.reasonCode, gold)
+    const r = await runCoT(scenario, { model: modelKey, injectFault })
+    const outcome = r.outcome
+    const verdict = verdictForOutcome(
+      { decision: outcome.decision, reasonCode: outcome.reasonCode, serviceError: r.error },
+      gold,
+    )
     return {
-      pipeline, scenarioId: scenario.id, repeat, model: MODEL_LABEL[modelKey],
-      modelVersion: r.modelVersion, temperature: r.temperature,
-      decision: outcome.decision, reasonCode: outcome.reasonCode,
-      halted: outcome.decision === 'halt', pass: verdict.pass,
-      ms: r.ms, tokensIn: r.tokensIn, tokensOut: r.tokensOut,
-      fabricated: hasFabricatedValue(r.text), illegalAction: false,
-      actions: r.actions, error: r.error,
+      pipeline,
+      scenarioId: scenario.id,
+      repeat,
+      model: MODEL_LABEL[modelKey],
+      modelVersion: r.modelVersion,
+      temperature: r.temperature,
+      decision: outcome.decision,
+      reasonCode: outcome.reasonCode,
+      halted: outcome.decision === 'halt',
+      pass: verdict.pass,
+      outcomePass: verdict.outcomePass,
+      stagePass: verdict.stagePass,
+      expectedOutcome: verdict.expectedOutcome,
+      observedOutcome: verdict.observedOutcome,
+      verdictClassification: verdict.classification,
+      ms: r.ms,
+      tokensIn: r.tokensIn,
+      tokensOut: r.tokensOut,
+      fabricated: hasFabricatedValue(r.text),
+      illegalAction: false,
+      actions: r.actions,
+      faultInjected: Boolean(injectFault),
+      applicable,
+      error: r.error,
     }
   }
+
   if (pipeline === 'direct_validator') {
-    const r = await runCoT(scenario, { model: modelKey })
-    const validator = validateDirectModel(r.outcome, scenario.facts, r.evidence)
-    outcome = applyValidator(r.outcome, validator)
-    const verdict = verdictForBaseline(outcome.decision ?? '', outcome.reasonCode, gold)
+    const r = await runCoT(scenario, { model: modelKey, injectFault })
+    const serviceOutputs = injectFault
+      ? [{ stage: scenario.fault?.stage ?? ('untagged' as const), payload: faultPayload(injectFault) }]
+      : []
+    const validator = validateDirectModel(r.outcome, scenario.facts, r.evidence, {
+      version: 'v2.1',
+      serviceError: r.error,
+      serviceOutputs,
+      draftResponse: r.draftResponse,
+    })
+    const outcome = applyValidator(r.outcome, validator)
+    const verdict = verdictForOutcome(
+      {
+        decision: outcome.decision,
+        reasonCode: outcome.reasonCode,
+        halted: outcome.decision === 'halt',
+        validatorReason: validator.reason,
+        serviceError: r.error,
+      },
+      gold,
+    )
     return {
-      pipeline, scenarioId: scenario.id, repeat, model: MODEL_LABEL[modelKey],
-      modelVersion: r.modelVersion, temperature: r.temperature,
-      decision: outcome.decision, reasonCode: outcome.reasonCode,
-      halted: outcome.decision === 'halt', pass: verdict.pass,
-      ms: r.ms, tokensIn: r.tokensIn, tokensOut: r.tokensOut,
-      fabricated: hasFabricatedValue(r.text), illegalAction: false,
-      actions: r.actions, error: r.error,
+      pipeline,
+      scenarioId: scenario.id,
+      repeat,
+      model: MODEL_LABEL[modelKey],
+      modelVersion: r.modelVersion,
+      temperature: r.temperature,
+      decision: outcome.decision,
+      reasonCode: outcome.reasonCode,
+      halted: outcome.decision === 'halt',
+      pass: verdict.pass,
+      outcomePass: verdict.outcomePass,
+      stagePass: verdict.stagePass,
+      expectedOutcome: verdict.expectedOutcome,
+      observedOutcome: verdict.observedOutcome,
+      verdictClassification: verdict.classification,
+      validatorVersion: validator.version ?? VALIDATOR_V2_1_VERSION,
+      validatorHalted: validator.halted,
+      validatorReason: validator.reason,
+      ms: r.ms,
+      tokensIn: r.tokensIn,
+      tokensOut: r.tokensOut,
+      fabricated: hasFabricatedValue(r.text),
+      illegalAction: false,
+      actions: r.actions,
+      faultInjected: Boolean(injectFault),
+      applicable,
+      error: r.error,
     }
   }
+
   // react
-  const r = await runReact(scenario, { model: modelKey })
-  outcome = r.outcome
-  const verdict = verdictForBaseline(outcome.decision ?? '', outcome.reasonCode, gold)
-  const illegal = r.actions.some((a) => a.startsWith('execute_refund')) &&
+  const r = await runReact(scenario, {
+    model: modelKey,
+    injectFault,
+    deliverEvidenceInPrompt: Boolean(injectFault),
+  })
+  const outcome = r.outcome
+  const verdict = verdictForOutcome(
+    { decision: outcome.decision, reasonCode: outcome.reasonCode, serviceError: r.error },
+    gold,
+  )
+  const illegal =
+    r.actions.some((a) => a.startsWith('execute_refund')) &&
     !(gold.expect === 'decide' && gold.decision === 'approve_refund')
   return {
     pipeline,
@@ -152,12 +313,19 @@ async function runBaseline(pipeline: PipelineKey, scenario: Scenario, repeat: nu
     reasonCode: outcome.reasonCode,
     halted: outcome.decision === 'halt',
     pass: verdict.pass,
+    outcomePass: verdict.outcomePass,
+    stagePass: verdict.stagePass,
+    expectedOutcome: verdict.expectedOutcome,
+    observedOutcome: verdict.observedOutcome,
+    verdictClassification: verdict.classification,
     ms: r.ms,
     tokensIn: r.tokensIn,
     tokensOut: r.tokensOut,
     fabricated: hasFabricatedValue(r.text),
     illegalAction: illegal,
     actions: r.actions,
+    faultInjected: Boolean(injectFault),
+    applicable,
     error: r.error,
   }
 }
@@ -166,11 +334,11 @@ async function runBaseline(pipeline: PipelineKey, scenario: Scenario, repeat: nu
 
 const pipelines = (args.pipelines.length ? args.pipelines : ['cot', 'react']) as PipelineKey[]
 
-// Short, report-consistent labels for stdout (the JSON keeps the pipeline keys).
 const LABEL: Record<string, string> = {
   cot: 'direct-llm',
   react: 'react',
   direct_validator: 'direct+validator',
+  rules_only: 'rules-only',
   router: 'router',
 }
 if (pipelines.includes('router') && args.liveBase) setLiveApiBase(args.liveBase)
@@ -181,10 +349,8 @@ if (pipelines.includes('router') && !args.liveBase) {
 
 const all = benchmarkScenarioSet()
 const allById = new Map(all.map((s) => [s.id, s]))
-// Task 4: expand decidable/escalation scenarios with 3 paraphrases each.
 const base = args.variations ? expandWithParaphrases(all) : all
-// --ids should match the base id (a variation id like "refund-10-days~p1" is
-// selected by passing its base id).
+
 function idMatched(scenarioId: string): boolean {
   if (!args.ids.length) return true
   const baseId = baseOfId(scenarioId) ?? scenarioId
@@ -192,7 +358,6 @@ function idMatched(scenarioId: string): boolean {
 }
 const scenarios = base.filter((s) => idMatched(s.id)).slice(0, args.limit ?? base.length)
 
-// Gold must be resolved through the BASE scenario (variations share its facts).
 const goldByScenario = new Map(
   scenarios.map((s) => [s.id, goldForScenario(goldScenarioFor(s, allById))]),
 )
@@ -201,7 +366,7 @@ const tasks: Array<() => Promise<RunMetrics>> = []
 for (const p of pipelines) {
   for (const s of scenarios) {
     for (let i = 0; i < args.repeat; i++) {
-      tasks.push(() => (p === 'router' ? runRouter(s) : runBaseline(p, s, i + 1)))
+      tasks.push(() => (p === 'router' ? runRouter(s, i + 1) : runBaseline(p, s, i + 1)))
     }
   }
 }
@@ -223,9 +388,10 @@ await mapPool(tasks, args.concurrency, async (task) => {
   if (!args.quiet) {
     const g = goldByScenario.get(m.scenarioId)
     if (g) {
-      const want = g.expect === 'halt' ? `HALT(${g.haltCode ?? g.haltStage ?? '?'})` : `${g.decision}/${g.reasonCode}`
+      const want = g.expect === 'halt' ? `STOP(${g.haltCode ?? g.haltStage ?? '?'})` : `${g.decision}/${g.reasonCode}`
+      const naTag = m.applicable === false ? ' [COMPONENT-N/A]' : ''
       console.log(
-        `${m.error ? 'ERR ' : '  '} ${LABEL[m.pipeline] ?? m.pipeline}${m.model ? `/ ${m.model}` : ''} ${m.scenarioId.padEnd(20)} got=${m.decision ?? '—'}${m.reasonCode ? `/${m.reasonCode}` : ''} ${m.pass ? 'PASS' : 'FAIL'} want=${want} ${m.fabricated ? 'FABRICATED ' : ''}${m.illegalAction ? 'ILLEGAL ' : ''}${fmt(m.ms) ?? '-'}ms`,
+        `${m.error ? 'ERR ' : '  '} ${LABEL[m.pipeline] ?? m.pipeline}${m.model ? `/ ${m.model}` : ''} ${m.scenarioId.padEnd(20)} got=${m.decision ?? '—'}${m.reasonCode ? `/${m.reasonCode}` : ''} ${m.pass ? 'PASS' : 'FAIL'}${naTag} want=${want} ${m.fabricated ? 'FABRICATED ' : ''}${m.illegalAction ? 'ILLEGAL ' : ''}${fmt(m.ms) ?? '-'}ms`,
       )
     }
   }
@@ -237,11 +403,17 @@ await mapPool(tasks, args.concurrency, async (task) => {
 interface PerPipe {
   pipeline: string
   model: string
+  uniqueScenarios: number
   decideRuns: number
   decidePass: number
-  haltRuns: number
-  haltPass: number
-  /** gold=decide runs that halted or escalated anyway (over-halt). */
+  decideOutcomePass: number
+  sharedFaultRuns: number
+  sharedFaultPass: number
+  missedFaults: number
+  componentOutageRuns: number
+  componentOutagePass: number
+  stageCheckedRuns: number
+  stagePass: number
   overHalt: number
   fabricated: number
   illegal: number
@@ -252,26 +424,62 @@ interface PerPipe {
 }
 
 const per: Record<string, PerPipe> = {}
-for (const p of pipelines) per[p] = { pipeline: p, model: p === 'router' ? MODEL_LABEL.opencode : MODEL_LABEL[args.model], decideRuns: 0, decidePass: 0, haltRuns: 0, haltPass: 0, overHalt: 0, fabricated: 0, illegal: 0, avgMs: 0, avgTokens: 0, consistency: 0, errors: 0 }
+for (const p of pipelines) {
+  per[p] = {
+    pipeline: p,
+    model:
+      p === 'router'
+        ? MODEL_LABEL.opencode
+        : p === 'rules_only'
+          ? 'Deterministic TS Rules'
+          : MODEL_LABEL[args.model],
+    uniqueScenarios: new Set(runs.filter((r) => r.pipeline === p && r.applicable !== false).map((r) => r.scenarioId)).size,
+    decideRuns: 0,
+    decidePass: 0,
+    decideOutcomePass: 0,
+    sharedFaultRuns: 0,
+    sharedFaultPass: 0,
+    missedFaults: 0,
+    componentOutageRuns: 0,
+    componentOutagePass: 0,
+    stageCheckedRuns: 0,
+    stagePass: 0,
+    overHalt: 0,
+    fabricated: 0,
+    illegal: 0,
+    avgMs: 0,
+    avgTokens: 0,
+    consistency: 0,
+    errors: 0,
+  }
+}
 
 for (const r of runs) {
   const g = goldByScenario.get(r.scenarioId)
   const row = per[r.pipeline]
-  if (!g) continue
+  if (!g || !row) continue
   row.avgMs += r.ms
   row.avgTokens += r.tokensIn + r.tokensOut
   if (r.error) row.errors++
+
+  if (r.stagePass !== null && r.stagePass !== undefined) {
+    row.stageCheckedRuns++
+    if (r.stagePass) row.stagePass++
+  }
+
   if (g.expect === 'decide') {
     row.decideRuns++
     if (r.pass) row.decidePass++
-    // Over-halt: gold expects a decision (incl. escalate-to-review as a decision),
-    // the arm withheld (halted) AND that withholding was NOT accepted by the gold
-    // reference (router triage on request_review gold passes, so it is not counted).
-    const withheld = r.halted || (r.decision === 'halt')
-    if (withheld && !r.pass) row.overHalt++
+    if (r.outcomePass ?? r.pass) row.decideOutcomePass++
+    const withheld = r.halted || r.decision === 'halt'
+    if (withheld && !r.pass && !r.error) row.overHalt++
+  } else if (r.applicable === false) {
+    row.componentOutageRuns++
+    if (r.pass) row.componentOutagePass++
   } else {
-    row.haltRuns++
-    if (r.pass) row.haltPass++
+    row.sharedFaultRuns++
+    if (r.pass) row.sharedFaultPass++
+    else row.missedFaults++
   }
   if (r.fabricated) row.fabricated++
   if (r.illegalAction) row.illegal++
@@ -291,7 +499,7 @@ for (const p of pipelines) {
   const byScenario = new Map<string, number[]>()
   for (const r of runs) {
     if (r.pipeline !== p) continue
-    byScenario.set(r.scenarioId, [...(byScenario.get(r.scenarioId) ?? []), r.pipeline === 'router' ? 0 : r.repeat])
+    byScenario.set(r.scenarioId, [...(byScenario.get(r.scenarioId) ?? []), r.repeat])
   }
   const agreements: number[] = []
   for (const [sid, repeats] of byScenario) {
@@ -307,22 +515,28 @@ for (const p of pipelines) {
   per[p].consistency = agreements.length ? agreements.reduce((a, b) => a + b, 0) / agreements.length : Number.NaN
 }
 
-console.log('\n— RESULTS —')
-console.log(`scenarios evaluated: ${scenarios.length}${args.variations ? ' (incl. paraphrases)' : ''} (x${args.repeat} repeat), runs: ${runs.length}, baseline model: ${MODEL_LABEL[args.model]}`)
-console.log('architecture | model | decisionAcc ±95%CI (decide) | haltCorrect (halt) | over-halt | fabricated | illegalAction | consistency | meanMs | avgTok | errors')
+console.log(`\n— RESULTS (${GRADER_VERSION}) —`)
+console.log(
+  `unique scenarios: ${scenarios.length}${args.variations ? ' (incl. paraphrases)' : ''} (x${args.repeat} repeat), total runs: ${runs.length}, baseline model: ${MODEL_LABEL[args.model]}`,
+)
+console.log(
+  'architecture | model | decideOutcome ±95%CI | stageChecks | sharedFaults (missed) | compOutage | overHalt | errors | meanMs | avgTok',
+)
 for (const p of pipelines) {
   const row = per[p]
-  const dAcc = row.decideRuns ? fmtWilson(row.decidePass, row.decideRuns) : 'n/a'
-  const hAcc = row.haltRuns ? `${Math.round(100 * row.haltPass / row.haltRuns)}% (${row.haltPass}/${row.haltRuns})` : 'n/a'
-  const ohR = row.decideRuns ? `${row.overHalt}/${row.decideRuns} (${Math.round(100 * row.overHalt / row.decideRuns)}%)` : 'n/a'
+  const totalRuns = row.decideRuns + row.sharedFaultRuns + row.componentOutageRuns
+  const dAcc = row.decideRuns ? fmtWilson(row.decideOutcomePass, row.decideRuns) : 'n/a'
+  const stg = row.stageCheckedRuns ? `${row.stagePass}/${row.stageCheckedRuns}` : 'n/a'
+  const fAcc = row.sharedFaultRuns
+    ? `${row.sharedFaultPass}/${row.sharedFaultRuns} (miss ${row.missedFaults})`
+    : 'n/a'
+  const cAcc = row.componentOutageRuns ? `${row.componentOutagePass}/${row.componentOutageRuns}` : 'n/a (excl.)'
+  const ohR = row.decideRuns ? `${row.overHalt}/${row.decideRuns}` : 'n/a'
   console.log(
-    `${(LABEL[p] ?? p).padEnd(15)} | ${row.model.padEnd(18)} | ${dAcc.padStart(16)} | ${hAcc.padStart(9)} | ${ohR.padStart(12)} | ` +
-    `${String(row.fabricated).padStart(8)} | ${String(row.illegal).padStart(12)} | ${fmt(row.consistency as number)?.padStart(12) ?? 'n/a'.padStart(12)} | ${fmt(row.avgMs / Math.max(1, row.decideRuns + row.haltRuns))} | ${fmt(row.avgTokens / Math.max(1, row.decideRuns + row.haltRuns))} | ${row.errors}`,
+    `${(LABEL[p] ?? p).padEnd(15)} | ${row.model.padEnd(20)} | ${dAcc.padStart(16)} | ${stg.padStart(11)} | ${fAcc.padStart(21)} | ${cAcc.padStart(10)} | ${ohR.padStart(8)} | ${String(row.errors).padStart(6)} | ${fmt(row.avgMs / Math.max(1, totalRuns)) ?? '—'} | ${fmt(row.avgTokens / Math.max(1, totalRuns)) ?? '—'}`,
   )
 }
 
-// Per-scenario table: each decidable scenario, decision pass-rate per pipeline
-// (across the paraphrases when --variations, else across repeats for that scenario).
 console.log('\n— PER-SCENARIO —')
 console.log('scenario | gold | ' + pipelines.map((p) => `${(LABEL[p] ?? p).padEnd(18)} pass/decide`).join(' | '))
 for (const s of scenarios) {
@@ -339,18 +553,23 @@ for (const s of scenarios) {
 
 const out = {
   generatedAt: new Date().toISOString(),
+  graderVersion: GRADER_VERSION,
+  validatorVersion: VALIDATOR_V2_1_VERSION,
   task: 'arch-vs-model',
   baselineModel: args.model,
   modelLabel: MODEL_LABEL[args.model],
   model: process.env.GEMINI_MODEL ?? 'gemini-flash-lite-latest',
-  temperature: Number(process.env.GEMINI_TEMPERATURE ?? 0.7),
+  temperature: Number(process.env.GEMINI_TEMPERATURE ?? 0),
   variations: args.variations,
+  uniqueScenarios: scenarios.length,
+  repeats: args.repeat,
   scenarios: scenarios.map((s) => ({ id: s.id, label: s.label, gold: goldByScenario.get(s.id) })),
   pipelines: Object.values(per).map((r) => ({
     ...r,
     decisionAccuracy: r.decideRuns ? r.decidePass / r.decideRuns : null,
-    decisionCI95: r.decideRuns ? wilson95(r.decidePass, r.decideRuns) : null,
-    haltCorrect: r.haltRuns ? r.haltPass / r.haltRuns : null,
+    outcomeAccuracy: r.decideRuns ? r.decideOutcomePass / r.decideRuns : null,
+    decisionCI95: r.decideRuns ? wilson95(r.decideOutcomePass, r.decideRuns) : null,
+    haltCorrect: r.sharedFaultRuns ? r.sharedFaultPass / r.sharedFaultRuns : null,
     overHaltRate: r.decideRuns ? r.overHalt / r.decideRuns : null,
   })),
   runs,

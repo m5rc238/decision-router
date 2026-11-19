@@ -22,12 +22,17 @@ import { callModel, type ModelKey } from './llm'
 export interface CoTOptions {
   mode?: PromptMode
   injectFault?: FaultKind
+  customEvidenceBlock?: string
   model?: ModelKey
 }
 
 /** The exact prompt text (evidence) a Direct-LLM arm receives. */
-export function buildDirectPrompt(scenario: Scenario, opts?: { injectFault?: FaultKind }): string {
+export function buildDirectPrompt(
+  scenario: Scenario,
+  opts?: { injectFault?: FaultKind; customEvidenceBlock?: string },
+): string {
   const inject = opts?.injectFault
+  const custom = opts?.customEvidenceBlock
   const record = getSupportRecord(scenario)
   return [
     'CASE:',
@@ -35,28 +40,34 @@ export function buildDirectPrompt(scenario: Scenario, opts?: { injectFault?: Fau
     '',
     'VERIFIED SUPPORT RECORD (the only source of truth):',
     recordToText(record),
-    ...(inject ? ['', faultEvidenceBlock(inject)] : []),
+    ...(custom ? ['', custom] : inject ? ['', faultEvidenceBlock(inject)] : []),
     '',
     'Render your judgement on this case.',
   ].join('\n')
 }
 
-async function parseOutcome(text: string): Promise<BaselineOutcome> {
+async function parseOutcome(text: string): Promise<{ outcome: BaselineOutcome; draftResponse: string | null }> {
   const data = (await Promise.resolve(extractJsonBlock(text))) as
-    | { decision?: string; reason_code?: string; reasonCode?: string }
+    | { decision?: string; reason_code?: string; reasonCode?: string; email?: string; rationale?: string }
     | null
-  if (!data) return { decision: null, reasonCode: null }
+  if (!data) return { outcome: { decision: null, reasonCode: null }, draftResponse: null }
   const decision = typeof data.decision === 'string' ? data.decision.trim() : null
   const reasonCode = typeof data.reason_code === 'string'
     ? data.reason_code.trim()
     : typeof data.reasonCode === 'string'
       ? data.reasonCode.trim()
       : null
-  return { decision, reasonCode }
+  const draftResponse = typeof data.email === 'string'
+    ? data.email.trim()
+    : typeof data.rationale === 'string'
+      ? data.rationale.trim()
+      : null
+  return { outcome: { decision, reasonCode }, draftResponse }
 }
 
 export async function runCoT(scenario: Scenario, opts?: CoTOptions): Promise<{
   outcome: BaselineOutcome
+  draftResponse?: string | null
   text: string
   evidence: string
   model?: ModelKey
@@ -71,11 +82,14 @@ export async function runCoT(scenario: Scenario, opts?: CoTOptions): Promise<{
   const mode: PromptMode = opts?.mode ?? 'not-told'
   const model: ModelKey = opts?.model ?? 'gemini'
   const inject = opts?.injectFault
-  const evidence = buildDirectPrompt(scenario, { injectFault: inject })
+  const customEvidenceBlock = opts?.customEvidenceBlock
+  const evidence = buildDirectPrompt(scenario, { injectFault: inject, customEvidenceBlock })
   try {
     const res = await callModel(model, { system: directLlmSystem(mode), prompt: evidence, json: true })
+    const parsed = await parseOutcome(res.text)
     return {
-      outcome: await parseOutcome(res.text),
+      outcome: parsed.outcome,
+      draftResponse: parsed.draftResponse,
       text: res.text,
       evidence,
       model,
@@ -89,6 +103,7 @@ export async function runCoT(scenario: Scenario, opts?: CoTOptions): Promise<{
   } catch (err) {
     return {
       outcome: { decision: null, reasonCode: null },
+      draftResponse: null,
       text: '',
       evidence,
       model,

@@ -1,0 +1,146 @@
+{
+  "bundleVersion": "2.0.0",
+  "graderVersion": "grader-v2.0",
+  "provenance": "synthetic_demonstration_fixture",
+  "note": "SYNTHETIC DEMONSTRATION FIXTURES ONLY — created offline to exercise stage-level grader rules (deliberate handoff vs unrelated outage, expected outage vs unrelated outage, composer contradiction, and v1 timeout bug). Never mixed into empirical benchmark counts.",
+  "traces": [
+    {
+      "id": "syn-refund-200-normal-pass",
+      "label": "Synthetic trace — normal 200-day refund denial completes cleanly",
+      "expectedPass": true,
+      "expectedOutcome": "deny_refund",
+      "expectedClassification": "valid_decision",
+      "run": {
+        "scenarioId": "refund-200-days",
+        "runId": 1,
+        "status": "done",
+        "totalMs": 4120,
+        "stages": [
+          { "key": "user_input", "layer": "input", "status": "done", "output": "I bought the Pro plan 200 days ago and I'd like a refund." },
+          { "key": "semantic_router", "layer": "llm", "status": "done", "highlight": "refund_request", "output": "{\"route\":\"refund_request\",\"decision_space\":\"plan_change_policy\",\"extracted_entities\":{\"plan\":\"Pro\",\"purchase_age_days\":\"200\"},\"ambiguity\":[]}" },
+          { "key": "route_contract", "layer": "deterministic", "status": "done", "highlight": "refund_request", "output": "{\"route\":\"refund_request\",\"decisionSpace\":\"plan_change_policy\",\"extractedEntities\":{\"plan\":\"Pro\",\"purchase_age_days\":\"200\"},\"ambiguity\":[]}" },
+          { "key": "verified_facts", "layer": "deterministic", "status": "done", "output": "{\"purchase_age_days\":200,\"refund_window_days\":30,\"account_status\":\"active\",\"previous_refunds_count\":0}" },
+          { "key": "jev_judgment", "layer": "jev", "status": "done", "highlight": "deny_refund", "output": "{\"decision\":\"deny_refund\",\"reason_code\":\"refund_window_exceeded\",\"confidence\":0.99}" },
+          { "key": "decision_contract", "layer": "deterministic", "status": "done", "highlight": "deny_refund", "output": "{\"decision\":\"deny_refund\",\"reasonCode\":\"refund_window_exceeded\",\"confidence\":0.99}" },
+          { "key": "response_composer", "layer": "llm", "status": "done", "output": "We are unable to approve your refund because your Pro plan purchase was 200 days ago, which is outside our 30-day refund window." },
+          { "key": "user_response", "layer": "output", "status": "done", "output": "We are unable to approve your refund because your Pro plan purchase was 200 days ago, which is outside our 30-day refund window." }
+        ]
+      }
+    },
+    {
+      "id": "syn-repeat-refunds-intentional-handoff-pass",
+      "label": "Synthetic trace — repeat-refund policy escalation (request_review/irregular_review) passes",
+      "expectedPass": true,
+      "expectedOutcome": "escalate",
+      "expectedClassification": "valid_escalation",
+      "run": {
+        "scenarioId": "edge-repeat-refunds",
+        "runId": 2,
+        "status": "done",
+        "totalMs": 6210,
+        "stages": [
+          { "key": "user_input", "layer": "input", "status": "done", "output": "Make me a refund again, Pro plan this time." },
+          { "key": "semantic_router", "layer": "llm", "status": "done", "highlight": "refund_request", "output": "{\"route\":\"refund_request\",\"decision_space\":\"plan_change_policy\",\"extracted_entities\":{\"plan\":\"Pro\"},\"ambiguity\":[]}" },
+          { "key": "route_contract", "layer": "deterministic", "status": "done", "highlight": "refund_request", "output": "{\"route\":\"refund_request\",\"decisionSpace\":\"plan_change_policy\",\"extractedEntities\":{\"plan\":\"Pro\"},\"ambiguity\":[]}" },
+          { "key": "verified_facts", "layer": "deterministic", "status": "done", "output": "{\"purchase_age_days\":10,\"refund_window_days\":30,\"account_status\":\"active\",\"previous_refunds_count\":3}" },
+          { "key": "jev_judgment", "layer": "jev", "status": "done", "highlight": "request_review", "output": "{\"decision\":\"request_review\",\"reason_code\":\"irregular_review\",\"confidence\":0.98}" },
+          { "key": "decision_contract", "layer": "deterministic", "status": "done", "highlight": "request_review", "output": "{\"decision\":\"request_review\",\"reasonCode\":\"irregular_review\",\"confidence\":0.98}" },
+          { "key": "response_composer", "layer": "llm", "status": "done", "output": "Because your account has prior refund history, a specialist will review your request." },
+          { "key": "user_response", "layer": "output", "status": "done", "output": "Because your account has prior refund history, a specialist will review your request." }
+        ]
+      }
+    },
+    {
+      "id": "syn-repeat-refunds-unrelated-jev-outage-fail",
+      "label": "Synthetic trace — repeat-refund scenario fails when Jev has an unrelated 502 outage",
+      "expectedPass": false,
+      "expectedOutcome": "escalate",
+      "expectedClassification": "unrelated_service_error",
+      "run": {
+        "scenarioId": "edge-repeat-refunds",
+        "runId": 3,
+        "status": "error",
+        "totalMs": 2890,
+        "stages": [
+          { "key": "user_input", "layer": "input", "status": "done", "output": "Make me a refund again, Pro plan this time." },
+          { "key": "semantic_router", "layer": "llm", "status": "done", "highlight": "refund_request", "output": "{\"route\":\"refund_request\",\"decision_space\":\"plan_change_policy\",\"extracted_entities\":{\"plan\":\"Pro\"},\"ambiguity\":[]}" },
+          { "key": "route_contract", "layer": "deterministic", "status": "done", "highlight": "refund_request", "output": "{\"route\":\"refund_request\",\"decisionSpace\":\"plan_change_policy\",\"extractedEntities\":{\"plan\":\"Pro\"},\"ambiguity\":[]}" },
+          { "key": "verified_facts", "layer": "deterministic", "status": "done", "output": "{\"purchase_age_days\":10,\"refund_window_days\":30,\"account_status\":\"active\",\"previous_refunds_count\":3}" },
+          { "key": "jev_judgment", "layer": "jev", "status": "error", "errorCode": "jev_error", "error": "Jev endpoint responded 502." },
+          { "key": "decision_contract", "layer": "deterministic", "status": "idle" },
+          { "key": "response_composer", "layer": "llm", "status": "idle" },
+          { "key": "user_response", "layer": "output", "status": "idle" }
+        ]
+      }
+    },
+    {
+      "id": "syn-failure-jev-down-expected-outage-pass",
+      "label": "Synthetic trace — injected Jev 502 outage passes when jev_judgment/jev_error is expected",
+      "expectedPass": true,
+      "expectedOutcome": "stop",
+      "expectedClassification": "valid_stop",
+      "run": {
+        "scenarioId": "failure-jev-down",
+        "runId": 4,
+        "status": "error",
+        "totalMs": 1450,
+        "stages": [
+          { "key": "user_input", "layer": "input", "status": "done", "output": "I bought the Pro plan 200 days ago and I'd like a refund." },
+          { "key": "semantic_router", "layer": "llm", "status": "done", "highlight": "refund_request", "output": "{\"route\":\"refund_request\",\"decision_space\":\"plan_change_policy\",\"extracted_entities\":{\"plan\":\"Pro\"},\"ambiguity\":[]}" },
+          { "key": "route_contract", "layer": "deterministic", "status": "done", "highlight": "refund_request", "output": "{\"route\":\"refund_request\",\"decisionSpace\":\"plan_change_policy\",\"extractedEntities\":{\"plan\":\"Pro\"},\"ambiguity\":[]}" },
+          { "key": "verified_facts", "layer": "deterministic", "status": "done", "output": "{\"purchase_age_days\":200,\"refund_window_days\":30,\"account_status\":\"active\",\"previous_refunds_count\":0}" },
+          { "key": "jev_judgment", "layer": "jev", "status": "error", "errorCode": "jev_error", "faulted": true, "error": "Jev upstream returned 502 Bad Gateway (injected demo fault)." },
+          { "key": "decision_contract", "layer": "deterministic", "status": "idle" },
+          { "key": "response_composer", "layer": "llm", "status": "idle" },
+          { "key": "user_response", "layer": "output", "status": "idle" }
+        ]
+      }
+    },
+    {
+      "id": "syn-failure-contradicts-stop-pass",
+      "label": "Synthetic trace — composer contradiction guardrail stops dispatch on 200-day denial",
+      "expectedPass": true,
+      "expectedOutcome": "stop",
+      "expectedClassification": "valid_stop",
+      "run": {
+        "scenarioId": "failure-contradicts",
+        "runId": 5,
+        "status": "error",
+        "totalMs": 2740,
+        "stages": [
+          { "key": "user_input", "layer": "input", "status": "done", "output": "I bought the Pro plan 200 days ago and I'd like a refund." },
+          { "key": "semantic_router", "layer": "llm", "status": "done", "highlight": "refund_request", "output": "{\"route\":\"refund_request\",\"decision_space\":\"plan_change_policy\",\"extracted_entities\":{\"plan\":\"Pro\"},\"ambiguity\":[]}" },
+          { "key": "route_contract", "layer": "deterministic", "status": "done", "highlight": "refund_request", "output": "{\"route\":\"refund_request\",\"decisionSpace\":\"plan_change_policy\",\"extractedEntities\":{\"plan\":\"Pro\"},\"ambiguity\":[]}" },
+          { "key": "verified_facts", "layer": "deterministic", "status": "done", "output": "{\"purchase_age_days\":200,\"refund_window_days\":30,\"account_status\":\"active\",\"previous_refunds_count\":0}" },
+          { "key": "jev_judgment", "layer": "jev", "status": "done", "highlight": "deny_refund", "output": "{\"decision\":\"deny_refund\",\"reason_code\":\"refund_window_exceeded\",\"confidence\":0.99}" },
+          { "key": "decision_contract", "layer": "deterministic", "status": "done", "highlight": "deny_refund", "output": "{\"decision\":\"deny_refund\",\"reasonCode\":\"refund_window_exceeded\",\"confidence\":0.99}" },
+          { "key": "response_composer", "layer": "llm", "status": "error", "faulted": true, "errorCode": "composer_contradiction", "output": "Great news — we've approved your refund and issued it to your card. You'll see it within 5–7 business days.", "error": "The composer response contradicts the denied decision." },
+          { "key": "user_response", "layer": "output", "status": "idle" }
+        ]
+      }
+    },
+    {
+      "id": "syn-conflicting-claims-wrong-approve-timeout-fail",
+      "label": "Synthetic trace — reproduces v1 bug (wrong approve_refund + composer timeout fails under v2)",
+      "expectedPass": false,
+      "expectedOutcome": "escalate",
+      "expectedClassification": "unrelated_service_error",
+      "run": {
+        "scenarioId": "edge-conflicting-claims",
+        "runId": 6,
+        "status": "error",
+        "totalMs": 241517,
+        "stages": [
+          { "key": "user_input", "layer": "input", "status": "done", "output": "I bought this 2 months ago but my dashboard says 10 days ago, refund me!" },
+          { "key": "semantic_router", "layer": "llm", "status": "done", "highlight": "refund_request", "output": "{\"route\":\"refund_request\",\"decision_space\":\"plan_change_policy\",\"extracted_entities\":{\"purchase_age_days\":\"10\"},\"ambiguity\":[]}" },
+          { "key": "route_contract", "layer": "deterministic", "status": "done", "highlight": "refund_request", "output": "{\"route\":\"refund_request\",\"decisionSpace\":\"plan_change_policy\",\"extractedEntities\":{\"purchase_age_days\":\"10\"},\"ambiguity\":[]}" },
+          { "key": "verified_facts", "layer": "deterministic", "status": "done", "output": "{\"purchase_age_days\":10,\"refund_window_days\":30,\"account_status\":\"active\",\"previous_refunds_count\":0}" },
+          { "key": "jev_judgment", "layer": "jev", "status": "done", "highlight": "approve_refund", "output": "{\"decision\":\"approve_refund\",\"reason_code\":\"within_refund_window\",\"confidence\":0.92}" },
+          { "key": "decision_contract", "layer": "deterministic", "status": "done", "highlight": "approve_refund", "output": "{\"decision\":\"approve_refund\",\"reasonCode\":\"within_refund_window\",\"confidence\":0.92}" },
+          { "key": "response_composer", "layer": "llm", "status": "error", "errorCode": "opencode_timeout", "error": "OpenCode request timed out after 240s." },
+          { "key": "user_response", "layer": "output", "status": "idle" }
+        ]
+      }
+    }
+  ]
+}

@@ -34,11 +34,14 @@ export function ResultsPage() {
       <header className="flex flex-col gap-2">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h2 className="text-xl font-bold tracking-tight">Evaluation Results</h2>
-          <span className="badge badge-primary badge-sm font-mono text-[10px]">120 Live Executions</span>
+          <span className="badge badge-primary badge-sm font-mono text-[10px]">grader-v2.0 + Offline Replay</span>
         </div>
         <p className="max-w-3xl text-sm text-base-content/70">
-          Full results of the 20-scenario empirical benchmark comparing the Decision Router against Direct-LLM (CoT) and ReAct Agent baselines across decision accuracy, fail-closed safety, and token economics.
+          Offline-verified comparison of Deterministic Rules, Decision Router, Direct-LLM + Validator, Direct-LLM, and ReAct across decision accuracy, fault handling, and illustrative error cost.
         </p>
+        <div className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-xs leading-relaxed text-base-content/85">
+          <strong>Historical v1 reports notice:</strong> The two report tabs below preserve the historical v1 reports with a top-level <code>grader-v2.0</code> errata note (3 Router v1 passes flipped to FAIL and 10 halt runs marked unverifiable for missing stage traces). Run <code>npm run replay</code> or see <code>README.md</code> for the corrected v2.1 figures.
+        </div>
       </header>
 
       {/* Aggregate Architecture Comparison Table */}

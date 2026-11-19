@@ -5,6 +5,36 @@ tracked here. Methodology notes that change interpretation of numbers are
 flagged so results never silently mean something different than the previous
 run.
 
+## [v2.1] Rigor Audit, Security Fixes, Rules Baseline & Docs Alignment
+
+Addresses methodological blind spots, prompt-injection vulnerabilities, global mutable state bugs, dead code, and stale reporting exposed during the post-v2 audit:
+
+### New zero-AI baseline (`scripts/lib/rules.ts`)
+- Added `runDeterministicPolicy` (`rules_only` pipeline in `eval.ts`, `rules-only` arm in `fault-eval.ts`, and replay summary).
+- Matches Direct-LLM (`13/15`, `86.7%`) on decidable scenarios and catches `4/4` shared faults in `<1 ms` with `$0` AI cost, isolating where semantic judgment is genuinely required (`ambiguous-plan`, `edge-conflicting-claims`, `judgment-needed-v1.0`).
+
+### Validator hardening & 3-version audit (`scripts/lib/validator.ts`, `scripts/lib/challenge.ts`)
+- Preserved `validator-v1.0-frozen` (`validateDirectModelV1`) and `validator-v2.0-structural` (`validateDirectModelV2_0`) alongside the new default **`validator-v2.1-structured`** (`validateDirectModelV2_1`).
+- Closed customer `CASE:` prompt-injection DoS and shadow-bypass flaws exposed in `post-v2-audit-v1.0` (`0/2` on `v2.0` → `2/2` on `v2.1`) by validating structured `serviceOutputs` objects (legacy flat-string fallback scoped after `lastIndexOf('\nVERIFIED SUPPORT RECORD')`) and checking Direct-LLM's own `draftResponse`.
+- Fixed the `denyMentionedV2` proximity-regex false positive on `"cannot automatically decide"` in `fresh-valid-review-handoff-prose` (`composerGuardV2_1`; `composerGuardV2_0` preserved for regression).
+- Added `direct-native-v1.0` (`3/3` Direct+val, `1/1` applicable Router), deliberately un-tuned `regex-stress-v1.0` (`0/4` ceiling probe across both Direct+val and Router), and 2 live `judgment-needed-v1.0` cases.
+
+### Concurrency, error-masking & fairness fixes
+- `src/lib/live/pipeline.ts`: replaced global mutable `CURRENT.runId` cancellation with per-call `signal?: AbortSignal`; wrapped Stage 1 `callLlm` in `try/catch`; aligned `REASON_ALLOWED` to accept `regular_review` alongside `irregular_review` and enforced `REQUIRED_FACT_KEYS` (`purchase_age_days`, `refund_window_days`, `account_status`) in Stage 3 (`facts_missing`).
+- `scripts/lib/gemini.ts`: changed default sampling `temperature` from `0.7` to `0` for deterministic policy evals.
+- `scripts/eval.ts` & `scripts/fault-eval.ts`: fixed `r.error` masking (which had passed `5/5` Gemini HTTP `429` throttled runs in `eval-results-gemini-variations.json`), added `deliverEvidenceInPrompt` + `sawFaultEvidence` so ReAct cannot skip injected evidence (`0/4` in historical Gemini `fault-results.json`), and recorded `preValidatorDecision`.
+- `scripts/lib/replay.ts` & `scripts/replay.ts`: added 4×4 outcome confusion matrices, unique-scenario `5/5` consistency, illustrative asymmetric error costs, honest `not injected (N/A)` labeling on historical `eval.ts` fault rows, `stagePass: null` on v1 completed Router runs without stage traces, and `usedProxyRawOutcome` disclosure for offline `fault-results*.json` replay.
+
+### Dead-code cleanup, UI & documentation alignment
+- Removed unused mock pipeline/adapter/component code (`src/lib/pipeline/`, `src/lib/adapters/`, `src/lib/deterministic/`, `src/data/mockData.ts`, unused dashboard components).
+- Aligned React UI (`src/App.tsx` with `AbortController`, `BenchmarkMatrix.tsx`, `AuthorityBoundaries.tsx`, `BaselinePane.tsx`, `ResultsPage.tsx`).
+- Updated `README.md`, `eval_results_summary.md`, `docs/fault-injection.md`, `docs/model-separation.md`, `docs/rigor.md`, and `prompts/README.md` to v2.1; added `grader-v2.0` errata notes and relative links to preserved historical v1 reports (`docs/EVAL_REPORT_STANDARD.md`, `docs/EVAL_REPORT_STE100.md`) while keeping historical JSON logs untouched.
+
+## [v2.0] Stage-Aware Grader, Generalization Challenge Set & Offline Replay
+
+- **`grader-v2.0` (`src/lib/live/gold.ts`):** removed the permissive `request_review` error pass, required explicit valid escalation mechanisms and expected stage/reason codes, failed `unrelated_service_error`, separated common outcome verdicts from Router stage checks, and added `verdictForSavedRouterRun`. Auditing `eval-results-v1.json` revealed **3** Router v1 verdict flips (`26/30` → `21P / 7F / 2U`) and **10** unverifiable Router halt runs lacking stage traces (`10/10` → `2P / 8U` across fault/missing-facts halts).
+- **Challenge sets & offline bundle (`results/`):** published `results/offline-replay-bundle.v2.json` (`v2.1.0`), `results/synthetic-trace-fixtures.v2.json`, `results/challenge-eval-*.json`, `scripts/replay.ts` (`npm run replay`), `scripts/challenge-eval.ts` (`npm run challenge-eval`), and 20 automated tests in `tests/`.
+
 ## [Task 3] Homogeneity on the Router's model — 2026-09-25 (branch: working-tree, uncommitted)
 
 Separates ARCHITECTURE from MODEL: the baselines were systematically run on the

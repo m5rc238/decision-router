@@ -9,7 +9,10 @@
     "lint": "oxlint",
     "preview": "vite preview",
     "eval": "tsx scripts/eval.ts",
-    "fault-eval": "tsx scripts/fault-eval.ts"
+    "fault-eval": "tsx scripts/fault-eval.ts",
+    "challenge-eval": "tsx scripts/challenge-eval.ts",
+    "replay": "tsx scripts/replay.ts",
+    "test": "node --import tsx --test tests/*.test.ts"
   },
   "dependencies": {
     "daisyui": "^5.7.43",
