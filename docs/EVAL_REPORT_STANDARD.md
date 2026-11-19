@@ -9,11 +9,17 @@
 > isolate architecture from model choice — the router runs Big Pickle LLM
 > stages + the Jev Decision API while the baselines run Gemini flash-lite,
 > so results represent architecture + foundation-model configuration (see
-> `model-separation.md` for the matched-model follow-up). On well-formed
-> decisions the router tied the direct-LLM baseline (26/30 each); the
+> [`model-separation.md`](./model-separation.md) for the matched-model follow-up). On well-formed
+> decisions the router tied the direct-LLM baseline in v1 scoring (26/30 each); the
 > overall-accuracy gap comes entirely from the fail-closed rows, which use
-> architecture-aware fault cases (`fault-injection.md`). "Safety" in this
+> architecture-aware fault cases ([`fault-injection.md`](./fault-injection.md)). "Safety" in this
 > report means fail-closed handling on those defined cases only.
+>
+> **v2.1 `grader-v2.0` errata (sections 1–7 below preserve the historical v1 report verbatim):**
+> An offline re-score of the saved v1 runs in [`results/offline-replay-bundle.v2.json`](../results/offline-replay-bundle.v2.json) exposed three defects in v1 scoring:
+> (1) the historical Router **26/30** decide score re-scores to **21P / 7F / 2U** because 3 runs flipped from `PASS` to `FAIL` (#117–#118 `edge-chargeback-threat` halted with `decision: null` and no triage note [`invalid_escalation_mechanism`]; #119 `edge-conflicting-claims` wrongly approved then timed out at composer after `241,517 ms` [`unrelated_service_error`]);
+> (2) all **10/10** historical Router halt runs lack saved `runStatus`/`stages`/`haltStage`/`haltCode` fields and are flagged **unverifiable** offline (`2P / 6U` on shared faults, `0P / 2U` on `jev-500`; overall stage checks `4P / 6F / 10U / 20ns`);
+> (3) `eval.ts` never injected faults into the v1 baseline prompts, so the baseline `0/10` fault rows represent **`not injected (N/A)`** (`8` shared faults un-injected, `2` `jev-500` excluded) — matched fault results (`0/4` CoT/ReAct vs `4/4` Direct+validator) come from [`fault-injection.md`](./fault-injection.md). A zero-AI deterministic rule function (`scripts/lib/rules.ts`, `rules_only`) also achieves **13/15 (86.7%)** on the decide set in `<1 ms`. See [`../README.md`](../README.md) and [`../eval_results_summary.md`](../eval_results_summary.md) or run `npm run replay`.
 
 ---
 
@@ -188,8 +194,7 @@ From this investigation, we synthesize four mandatory axioms for engineering aut
 
 ## 8. Reproducibility & Repository Artifacts
 
-This research is 100% open, local, and reproducible:
-- **Evaluation Runner Script:** [`scripts/eval.ts`](file:///Users/ahkeewan/Documents/Projects/decision-router/scripts/eval.ts)
-- **Scenario Definitions & Gold Oracle:** [`src/lib/live/gold.ts`](file:///Users/ahkeewan/Documents/Projects/decision-router/src/lib/live/gold.ts), [`scripts/lib/scenarios.ts`](file:///Users/ahkeewan/Documents/Projects/decision-router/scripts/lib/scenarios.ts)
-- **Raw Execution Log ($N=120$):** [`eval-results.json`](file:///Users/ahkeewan/Documents/Projects/decision-router/eval-results.json)
+- **Evaluation Runner Script:** [`scripts/eval.ts`](../scripts/eval.ts)
+- **Scenario Definitions & Gold Oracle:** [`src/lib/live/gold.ts`](../src/lib/live/gold.ts), [`scripts/lib/scenarios.ts`](../scripts/lib/scenarios.ts)
+- **Sanitized Offline Replay Bundle (`grader-v2.0`):** [`results/offline-replay-bundle.v2.json`](../results/offline-replay-bundle.v2.json) (archives the historical `eval-results-v1.json` / `eval-results.json` runs alongside repeat-5 and fault-matrix logs; recompute offline with `npm run replay`)
 - **Interactive UI Dashboard:** Available at `http://localhost:5173/#results`

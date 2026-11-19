@@ -13,23 +13,24 @@
 // branches (JSON validation, triage, guardrails) can be demonstrated
 // deterministically. Injected stages are marked `faulted` in the UI.
 
-import type {
-  DecisionContract,
-  Fault,
-  JevCallResult,
-  JevSelected,
-  LiveRun,
-  LiveStage,
-  LlmCallResult,
-  RouterContract,
-  Scenario,
-  StageKey,
-  VerifiedFacts,
+import {
+  REQUIRED_FACT_KEYS,
+  type DecisionContract,
+  type Fault,
+  type JevCallResult,
+  type JevSelected,
+  type LiveRun,
+  type LiveStage,
+  type LlmCallResult,
+  type RouterContract,
+  type Scenario,
+  type StageKey,
+  type VerifiedFacts,
 } from './types'
 import type { Layer } from '../../types'
 import { asRecord, extractJsonObject, stringify } from './json'
 
-const ROUTE_CATALOG = new Set([
+export const ROUTE_CATALOG = new Set([
   'refund_request',
   'billing_dispute',
   'technical_issue',
@@ -39,12 +40,12 @@ const ROUTE_CATALOG = new Set([
   'human_triage',
 ])
 
-const DECISIONS = new Set(['approve_refund', 'deny_refund', 'request_review'])
+export const DECISIONS = new Set(['approve_refund', 'deny_refund', 'request_review'])
 
-const REASON_ALLOWED: Record<string, string[]> = {
+export const REASON_ALLOWED: Record<string, string[]> = {
   approve_refund: ['within_refund_window'],
   deny_refund: ['refund_window_exceeded', 'not_eligible'],
-  request_review: ['irregular_review'],
+  request_review: ['irregular_review', 'regular_review'],
 }
 
 export const STAGE_KEYS: StageKey[] = [
@@ -207,7 +208,9 @@ function jevQuestions(): Record<string, unknown> {
         within_refund_window: 'purchase_age_days <= refund_window_days',
         refund_window_exceeded: 'purchase_age_days > refund_window_days',
         not_eligible: 'account not active or otherwise ineligible',
-        irregular_review: 'previous_refunds_count >= 2 (repeated refund activity), or irregular/ambiguous facts require a specialist',
+        irregular_review: 'previous_refunds_count >= 2 (repeated refund activity requiring specialist review)',
+        regular_review:
+          'intent is ambiguous, verified facts are incomplete, or customer claims contradict the verified record',
       },
     },
   }
@@ -240,7 +243,7 @@ function composerPrompt(decision: DecisionContract): string {
 // ---------------------------------------------------------------------------
 // Validation helpers
 
-function validateRouter(parsed: unknown): { contract: RouterContract; triage: boolean; triageNote: string } | null {
+export function validateRouter(parsed: unknown): { contract: RouterContract; triage: boolean; triageNote: string } | null {
   const rec = asRecord(parsed)
   if (!rec) return null
   const route = typeof rec.route === 'string' ? rec.route.trim() : ''
@@ -273,7 +276,7 @@ function validateRouter(parsed: unknown): { contract: RouterContract; triage: bo
   return { contract, triage: notConfident, triageNote: note }
 }
 
-function buildDecision(j: JevCallResult, facts: VerifiedFacts): {
+export function buildDecision(j: JevCallResult, facts: VerifiedFacts): {
   contract: DecisionContract
   selected: JevSelected
 } | null {
@@ -299,29 +302,35 @@ function buildDecision(j: JevCallResult, facts: VerifiedFacts): {
 
 const NEG_WORDS = /\b(no|not|cannot|can'?t|never|won'?t|without|unable|isn'?t|aren'?t|haven'?t|hasn'?t|no longer)\b/i
 
-function negatedBefore(text: string, index: number): boolean {
-  return NEG_WORDS.test(text.slice(Math.max(0, index - 24), index))
+function negatedBefore(text: string, index: number, window = 24): boolean {
+  return NEG_WORDS.test(text.slice(Math.max(0, index - window), index))
+}
+
+function anyUnnegatedMatch(patterns: RegExp[], text: string, window = 24): boolean {
+  for (const src of patterns) {
+    const re = new RegExp(src.source, src.flags.includes('g') ? src.flags : `${src.flags}g`)
+    let m: RegExpExecArray | null
+    while ((m = re.exec(text))) {
+      if (!negatedBefore(text, m.index, window)) return true
+    }
+  }
+  return false
 }
 
 function approveMentioned(text: string): boolean {
-  const re = /\b(approved|approve|refunded|credited|issued|granted|refund issued|will refund|going to refund|we'?ve refunded)\b/gi
-  let m: RegExpExecArray | null
-  while ((m = re.exec(text))) {
-    if (!negatedBefore(text, m.index)) return true
-  }
-  return false
+  return anyUnnegatedMatch(
+    [/\b(approved|approve|refunded|credited|issued|granted|refund issued|will refund|going to refund|we'?ve refunded)\b/gi],
+    text,
+    24,
+  )
 }
 
 function denyMentioned(text: string): boolean {
-  const re = /\b(denied|deny|unable|cannot|can'?t|not able)\b/gi
-  let m: RegExpExecArray | null
-  while ((m = re.exec(text))) {
-    if (!negatedBefore(text, m.index)) return true
-  }
-  return false
+  return anyUnnegatedMatch([/\b(denied|deny|unable|cannot|can'?t|not able)\b/gi], text, 24)
 }
 
-function composerGuard(decision: DecisionContract['decision'], text: string): string | null {
+/** Frozen v1 composer contradiction guardrail preserved for baseline comparisons. */
+export function composerGuardV1(decision: DecisionContract['decision'], text: string): string | null {
   if (text.trim().length === 0) return 'the composer produced no output'
   if (decision === 'approve_refund' && denyMentioned(text)) {
     return 'the composer response contradicts the approved decision'
@@ -334,6 +343,77 @@ function composerGuard(decision: DecisionContract['decision'], text: string): st
   }
   return null
 }
+
+function approveMentionedV2(text: string): boolean {
+  return anyUnnegatedMatch(
+    [
+      /\b(approved|approve|refunded|credited|issued|granted|refund issued|will refund|going to refund|we'?ve refunded)\b/gi,
+      /\breimbursement\s+(?:is|has\s+been)\s+(?:confirmed|processed|approved|issued|completed)\b/gi,
+      /\b(?:funds\s+are\s+returning|money\s+(?:is\s+on\s+its\s+way|returning|sent)\s+back|sent\s+the\s+money\s+back)\b/gi,
+      /\brefund\s+(?:is|has\s+been)\s+(?:complete|completed|processed|confirmed)\b/gi,
+    ],
+    text,
+    32,
+  )
+}
+
+function denyMentionedV2_0(text: string): boolean {
+  return anyUnnegatedMatch(
+    [
+      /\b(denied|deny|declined|decline|rejected|reject|ineligible|not eligible|no refund)\b/gi,
+      /\b(?:unable|cannot|can'?t|not able|won'?t|will not)\b(?:\s+\w+){0,4}\s+\b(?:approve|approved|refund|issue|grant|honor|credit|reimburse|process(?:\s+(?:a|your|this))?\s+refund)\b/gi,
+    ],
+    text,
+    24,
+  )
+}
+
+/**
+ * Frozen v2.0 composer contradiction guardrail (preserved so audit failures
+ * such as `fresh-valid-review-handoff-prose` remain reproducible).
+ */
+export function composerGuardV2_0(decision: DecisionContract['decision'], text: string): string | null {
+  if (text.trim().length === 0) return 'the composer produced no output'
+  if (decision === 'approve_refund' && denyMentionedV2_0(text)) {
+    return 'the composer response contradicts the approved decision'
+  }
+  if (decision === 'deny_refund' && approveMentionedV2(text)) {
+    return 'the composer response contradicts the denied decision (it implies a refund was issued)'
+  }
+  if (decision === 'request_review' && (approveMentionedV2(text) || denyMentionedV2_0(text))) {
+    return 'the composer response resolves a review decision into a definitive outcome'
+  }
+  return null
+}
+
+function denyMentionedV2_1(text: string): boolean {
+  return anyUnnegatedMatch(
+    [
+      /\b(denied|deny|declined|decline|rejected|reject|ineligible|not eligible|no refund)\b/gi,
+      /\b(?:unable|cannot|can'?t|not able|won'?t|will not)\s+(?:to\s+)?(?:(?:automatically|currently|immediately)\s+)?(?:approve|approved|refund|issue|grant|honor|credit|reimburse|process)\b/gi,
+    ],
+    text,
+    24,
+  )
+}
+
+/** Structural composer contradiction guardrail (v2.1). */
+export function composerGuardV2_1(decision: DecisionContract['decision'], text: string): string | null {
+  if (text.trim().length === 0) return 'the composer produced no output'
+  if (decision === 'approve_refund' && denyMentionedV2_1(text)) {
+    return 'the composer response contradicts the approved decision'
+  }
+  if (decision === 'deny_refund' && approveMentionedV2(text)) {
+    return 'the composer response contradicts the denied decision (it implies a refund was issued)'
+  }
+  if (decision === 'request_review' && (approveMentionedV2(text) || denyMentionedV2_1(text))) {
+    return 'the composer response resolves a review decision into a definitive outcome'
+  }
+  return null
+}
+
+export const composerGuardV2 = composerGuardV2_1
+export const composerGuard = composerGuardV2_1
 
 // ---------------------------------------------------------------------------
 // Fault injection (demo controls to exercise the real failure branches)
@@ -381,15 +461,25 @@ export interface StageRunInfo {
   faulted?: boolean
 }
 
-const CURRENT = { runId: 0 }
+let NEXT_RUN_ID = 0
+
+export interface LivePipelineRunnerDeps {
+  callLlm?: (prompt: string) => Promise<LlmCallResult>
+  callJev?: (state: unknown, questions: unknown) => Promise<JevCallResult>
+}
 
 export async function runLivePipeline(opts: {
   scenario: Scenario
   onUpdate: (run: LiveRun) => void
+  signal?: AbortSignal
+  deps?: LivePipelineRunnerDeps
 }): Promise<LiveRun> {
-  const { scenario, onUpdate } = opts
-  const runId = ++CURRENT.runId
+  const { scenario, onUpdate, signal, deps } = opts
+  const llmFn = deps?.callLlm ?? callLlm
+  const jevFn = deps?.callJev ?? callJev
+  const runId = ++NEXT_RUN_ID
   const started = Date.now()
+  const aborted = () => Boolean(signal?.aborted)
 
   const blank: LiveStage[] = STAGE_KEYS.map((key) => ({
     key,
@@ -399,13 +489,13 @@ export async function runLivePipeline(opts: {
   const run: LiveRun = { scenarioId: scenario.id, runId, status: 'running', stages: blank, totalMs: 0 }
 
   const push = (patch: Partial<LiveRun>) => {
-    if (CURRENT.runId !== runId) return
+    if (aborted()) return
     Object.assign(run, patch)
     onUpdate({ ...run, stages: run.stages.map((s) => ({ ...s })) })
   }
   // Local convenience to record a single stage change without touching others.
   const updateStage = (i: number, st: Partial<LiveStage>) => {
-    if (CURRENT.runId !== runId) return
+    if (aborted()) return
     run.stages[i] = { ...run.stages[i], ...st }
     push({})
   }
@@ -424,19 +514,29 @@ export async function runLivePipeline(opts: {
 
   // 0 · USER INPUT
   updateStage(i('user_input'), { status: 'running' })
-  if (CURRENT.runId !== runId) return run
+  if (aborted()) return run
   setDone(i('user_input'), { input: scenario.userInput, output: scenario.userInput, ms: 0 })
 
   // 1 · SEMANTIC ROUTER
+  const startedRouter = Date.now()
   updateStage(i('semantic_router'), { status: 'running', input: routerPrompt(scenario.userInput) })
   let routerText: string
-  if (fault?.stage === 'semantic_router') {
-    routerText = faultRouterText(fault)
-  } else {
-    const raw = await callLlm(routerPrompt(scenario.userInput))
-    if (CURRENT.runId !== runId) return run
-    routerText = raw.text
-    updateStage(i('semantic_router'), { ms: raw.ms, tokens: raw.tokens })
+  try {
+    if (fault?.stage === 'semantic_router') {
+      routerText = faultRouterText(fault)
+    } else {
+      const raw = await llmFn(routerPrompt(scenario.userInput))
+      if (aborted()) return run
+      routerText = raw.text
+      updateStage(i('semantic_router'), { ms: raw.ms, tokens: raw.tokens })
+    }
+  } catch (err) {
+    setError(i('semantic_router'), {
+      errorCode: err instanceof LiveError ? err.code : 'llm_unreachable',
+      error: err instanceof Error ? err.message : String(err),
+      ms: Date.now() - startedRouter,
+    })
+    return finish(run, started, signal)
   }
   const jsonText = extractJsonObject(routerText)
   const validated = jsonText ? validateRouter(safeParse(jsonText)) : null
@@ -448,7 +548,7 @@ export async function runLivePipeline(opts: {
       error:
         'The router output was not valid structured JSON, so no route contract could be built. Fail closed: human triage is required, the pipeline stops here.',
     })
-    return finish(run, started)
+    return finish(run, started, signal)
   }
   setDone(i('semantic_router'), {
     output: jsonText ?? '',
@@ -469,20 +569,22 @@ export async function runLivePipeline(opts: {
     run.status = 'triage'
     run.note = `Route: human_triage — ${validated.triageNote}. The request goes to a human; the composed pipeline halts here.`
     push({})
-    return finish(run, started)
+    return finish(run, started, signal)
   }
 
   // 3 · VERIFIED FACTS
   updateStage(i('verified_facts'), { status: 'running' })
   const facts = scenario.facts ?? {}
-  if (!facts || Object.keys(facts).length === 0) {
+  const missingFacts = REQUIRED_FACT_KEYS.filter((k) => facts[k] === undefined || facts[k] === null)
+  if (missingFacts.length > 0) {
     setError(i('verified_facts'), {
       input: 'facts source: scenario fixture',
+      output: stringify(facts),
       errorCode: 'facts_missing',
       error:
-        'No verified facts were available for route refund_request/plan_change_policy. Fail closed: the pipeline halts rather than let a model guess the undisputed facts.',
+        `Required verified facts missing (${missingFacts.join(', ')}). Fail closed: the pipeline halts rather than let a model guess undisputed facts.`,
     })
-    return finish(run, started)
+    return finish(run, started, signal)
   }
   setDone(i('verified_facts'), {
     input: 'facts source: local fixture (authoritative system data — never model memory)',
@@ -498,7 +600,7 @@ export async function runLivePipeline(opts: {
   })
   let jev: JevCallResult
   try {
-    jev = fault?.stage === 'jev_judgment' ? faultJev(fault) : await callJev(jevState(scenario.userInput, router, facts), jevQuestions())
+    jev = fault?.stage === 'jev_judgment' ? faultJev(fault) : await jevFn(jevState(scenario.userInput, router, facts), jevQuestions())
   } catch (err) {
     setError(i('jev_judgment'), {
       errorCode: err instanceof LiveError ? err.code : 'jev_unreachable',
@@ -506,9 +608,9 @@ export async function runLivePipeline(opts: {
       error: err instanceof Error ? err.message : String(err),
       ms: Date.now() - startedJev,
     })
-    return finish(run, started)
+    return finish(run, started, signal)
   }
-  if (CURRENT.runId !== runId) return run
+  if (aborted()) return run
   const decision = buildDecision(jev, facts)
   if (!decision) {
     setError(i('jev_judgment'), {
@@ -518,7 +620,7 @@ export async function runLivePipeline(opts: {
       error:
         'Jev did not return a valid typed judgment (unknown decision or a reason code inconsistent with the decision). Fail closed: nothing downstream runs.',
     })
-    return finish(run, started)
+    return finish(run, started, signal)
   }
   setDone(i('jev_judgment'), {
     input: `state:\n${stringify({ state: jevState(scenario.userInput, router, facts) })}\nquestions:\n${stringify(jevQuestions())}`,
@@ -551,8 +653,8 @@ export async function runLivePipeline(opts: {
       composerText = FAULT_COMPOSER_TEXT[fault.kind] ?? ''
       updateStage(i('response_composer'), { faulted: true })
     } else {
-      const raw = await callLlm(prompt)
-      if (CURRENT.runId !== runId) return run
+      const raw = await llmFn(prompt)
+      if (aborted()) return run
       composerText = raw.text
       updateStage(i('response_composer'), { ms: raw.ms, tokens: raw.tokens })
     }
@@ -561,7 +663,7 @@ export async function runLivePipeline(opts: {
       errorCode: err instanceof LiveError ? err.code : 'llm_unreachable',
       error: err instanceof Error ? err.message : String(err),
     })
-    return finish(run, started)
+    return finish(run, started, signal)
   }
   const guardError = composerGuard(decision.contract.decision, composerText)
   if (guardError) {
@@ -571,7 +673,7 @@ export async function runLivePipeline(opts: {
       errorCode: 'composer_contradiction',
       error: `The composer response was rejected by the guardrail: ${guardError}. The final message must not change the decision.`,
     })
-    return finish(run, started)
+    return finish(run, started, signal)
   }
   setDone(i('response_composer'), {
     input: prompt,
@@ -586,11 +688,11 @@ export async function runLivePipeline(opts: {
     output: composerText,
   })
 
-  return finish(run, started)
+  return finish(run, started, signal)
 }
 
-function finish(run: LiveRun, started: number): LiveRun {
-  if (CURRENT.runId !== run.runId) return run
+function finish(run: LiveRun, started: number, signal?: AbortSignal): LiveRun {
+  if (signal?.aborted) return run
   run.totalMs = Date.now() - started
   if (run.status === 'running') {
     run.status = run.stages.some((s) => s.status === 'error') ? 'error' : 'done'

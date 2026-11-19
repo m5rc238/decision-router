@@ -11,11 +11,17 @@ This document uses the rules of **ASD-STE100 (Simplified Technical English)**.
 > isolate architecture from model choice — the router runs Big Pickle LLM
 > stages + the Jev Decision API while the baselines run Gemini flash-lite,
 > so results represent architecture + foundation-model configuration (see
-> `model-separation.md` for the matched-model follow-up). On well-formed
-> decisions the router tied the direct-LLM baseline (26/30 each); the
+> [`model-separation.md`](./model-separation.md) for the matched-model follow-up). On well-formed
+> decisions the router tied the direct-LLM baseline in v1 scoring (26/30 each); the
 > overall-accuracy gap comes entirely from the fail-closed rows, which use
-> architecture-aware fault cases (`fault-injection.md`). "Safe stop" in this
+> architecture-aware fault cases ([`fault-injection.md`](./fault-injection.md)). "Safe stop" in this
 > report means fail-closed handling on those defined cases only.
+>
+> **Correction note (`grader-v2.0` audit — sections 1–7 below keep the historical v1 text):**
+> An offline audit of the saved v1 runs in [`results/offline-replay-bundle.v2.json`](../results/offline-replay-bundle.v2.json) shows three corrections:
+> (1) The Router v1 decide count changes from **26/30** to **21P / 7F / 2U**. Three Router runs changed from `PASS` to `FAIL`: runs #117 and #118 (`edge-chargeback-threat`) stopped with `decision: null` and no triage note (`invalid_escalation_mechanism`), and run #119 (`edge-conflicting-claims`) selected `approve_refund` and then hit a composer timeout after `241,517 ms` (`unrelated_service_error`).
+> (2) All **10** historical Router halt runs did not save `runStatus`, `stages`, `haltStage`, or `haltCode` fields, so `grader-v2.0` marks them **unverifiable** offline (`2P / 6U` on shared faults, `0P / 2U` on `jev-500`).
+> (3) In the v1 `eval.ts` run, the baseline prompts did not receive injected faults; those `0/10` baseline rows are **`not injected (N/A)`** (matched fault runs are in [`fault-injection.md`](./fault-injection.md)). A zero-AI deterministic rule function (`scripts/lib/rules.ts`, `rules_only`) scores **13/15 (86.7%)** on the decide scenarios in `<1 ms`. See [`../README.md`](../README.md) or run `npm run replay`.
 
 ---
 

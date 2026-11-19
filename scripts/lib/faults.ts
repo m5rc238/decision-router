@@ -12,7 +12,7 @@
 // still includes it). Told-vs-not-told is purely a prompt difference; fault
 // injection is applied identically to both.
 
-import type { Scenario } from '../../src/lib/live/types'
+import type { FaultStage, Scenario } from '../../src/lib/live/types'
 
 export type FaultKind =
   | 'invalid-json'
@@ -69,6 +69,16 @@ export function faultPayload(kind: FaultKind): string {
 }
 
 export const SERVICE_OUTPUT_LABEL = 'SERVICE OUTPUT (downstream services, for context):'
+
+export function serviceOutputStageHeader(stage: FaultStage): string {
+  return `SERVICE OUTPUT (${stage}):`
+}
+
+/** Build a stage-tagged or untagged service-output block for baseline evidence injection. */
+export function serviceEvidenceBlock(payload: string, stage?: FaultStage): string {
+  const header = stage ? serviceOutputStageHeader(stage) : SERVICE_OUTPUT_LABEL
+  return `${header}\n${payload}`
+}
 
 /**
  * A fault-delimited paragraph. Injected as-is into the baseline's evidence

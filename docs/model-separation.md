@@ -45,17 +45,19 @@ Gemini run, so model becomes a controlled variable.
 
 ## Results
 
-### Main benchmark (matched conditions, repeat=1)
+### Main benchmark (matched conditions, repeat=1 — Task 3 historical)
 
-| architecture | model | decide acc. | halt-correct |
+> **Audit note:** `halt-correct: 0/5` in the Task 3 `eval.ts` runs below reflects **`not injected (N/A)`** (because `eval.ts` did not inject faults into baseline evidence), rather than missed injected faults. For injected faults see the fault matrix below and `docs/fault-injection.md`. Under `grader-v2.0`, the Router v1 reference re-scores to **21P / 7F / 2U** decide and **2P / 8U** on the 10 fault/missing-facts halt runs.
+
+| architecture | model | decide acc. | `eval.ts` halt rows |
 |---|---|---|---|
-| Direct-LLM | Gemini flash-lite | 87% (13/15) | 0/5 |
-| ReAct | Gemini flash-lite | 53% (8/15) | 0/5 |
-| Direct+validator | Gemini flash-lite | 87% (13/15) | 0/5 |
-| Direct-LLM | Big Pickle | 73% (11/15) | 0/5 |
-| ReAct | Big Pickle | 73% (11/15) | 0/5 |
-| Direct+validator | Big Pickle | 80% (12/15) | 0/5 |
-| Router (live) | Big Pickle LLM stages + Jev | 87% (26/30, v1) | 10/10 (v1) |
+| Direct-LLM | Gemini flash-lite | 87% (13/15) | 0/5 (`not injected`) |
+| ReAct | Gemini flash-lite | 53% (8/15) | 0/5 (`not injected`) |
+| Direct+validator | Gemini flash-lite | 87% (13/15) | 0/5 (`not injected`) |
+| Direct-LLM | Big Pickle | 73% (11/15) | 0/5 (`not injected`) |
+| ReAct | Big Pickle | 73% (11/15) | 0/5 (`not injected`) |
+| Direct+validator | Big Pickle | 80% (12/15) | 0/5 (`not injected`) |
+| Router (live) | Big Pickle LLM stages + Jev | 87% hist. → **21P/7F/2U** (`grader-v2.0`) | 10/10 hist. → **2P / 8U** |
 
 ### Fault test (injected fault, gold = halt), halt-passing arms/total
 
@@ -83,9 +85,32 @@ Gemini run, so model becomes a controlled variable.
   (same underlying model) while adding 4/4 fault halts — the +1 point on Big
   Pickle is a separate LLM draw, not a validator effect.
 
+## Repeat-5 Follow-Up & `v2.1` Confound Audit (`N = 600` baseline runs + `rules_only`)
+
+Archived in [`results/offline-replay-bundle.v2.json`](../results/offline-replay-bundle.v2.json) and recomputed offline by `npm run replay` (from the saved `eval-results-gemini-rep5.json` at historical `T=0.7` and `eval-results-opencode-rep5.json`; 15 decide scenarios × 5 repeats = 75 runs per arm, plus deterministic zero-AI `rules_only`):
+
+| Architecture | Model / runtime | Unique `5/5` (`n=15`) | Decide runs (`n=75`) | Shared faults (`fault-results*`, `n=4`) | Illustrative cost/run\* | Mean latency | Mean tokens\*\* |
+| --- | --- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Deterministic Rules (`rules_only`)** | Pure TS (`0` LLM, `0` Jev) | **13/15 (`86.7%`)** | deterministic | **4/4** (`100%`) | 1.33 (ref) | `<1 ms` | `0` |
+| **Direct-LLM (`cot`)** | Gemini flash-lite (`T=0.7` hist.) | **13/15 (`86.7%`)** | **65/75 (`86.7%`)** | 0/4 (`told` & `not-told`) | 1.33 | 2,767 ms | 527 |
+| **Direct+Validator (`direct_validator`)** | Gemini flash-lite (`T=0.7` hist.) | **13/15 (`86.7%`)** | **65/75 (`86.7%`)** | **4/4** (`v1` & `v2.1`) | 1.33 | 2,214 ms | 527 |
+| **ReAct (`react`)** | Gemini flash-lite (`T=0.7` hist.) | 6/15 (`40.0%`) | 51/75 (`68.0%`) | 0/4 (`0/4` saw tool obs) | **0.76** | 3,687 ms | 840 |
+| **Direct-LLM (`cot`)** | Big Pickle (OpenCode) | **13/15 (`86.7%`)** | **65/75 (`86.7%`)** | 0/4 (`told` & `not-told`) | 1.33 | 1,728 ms | 502\*\* |
+| **Direct+Validator (`direct_validator`)** | Big Pickle (OpenCode) | **13/15 (`86.7%`)** | **65/75 (`86.7%`)** | **4/4** (`v1` & `v2.1`) | 1.33 | 1,966 ms | 68\*\* |
+| **ReAct (`react`)** | Big Pickle (OpenCode) | 11/15 (`73.3%`) | 64/75 (`85.3%`) | 0/4 (`4/4` saw tool obs) | 0.99 | 3,742 ms | 203\*\* |
+
+\*Illustrative heuristic weights per decide run: `wrongApproveRefund=10`, `serviceError=6`, `wrongDenyRefund=4`, `unnecessaryEscalate/Stop=1`. `eval.ts` did not inject shared faults into `rep5` (`not injected (20)` across all 6 model×arm cells).  
+\*\*`direct-validator` in offline fault replay uses the matching `direct-llm` run as a proxy raw outcome.
+
+### Remaining confounds exposed in `v2.1` (still separating architecture from runtime/model)
+
+1. **Repeat-1 draw noise disappeared at `repeat = 5`:** Whereas Big Pickle trailed Gemini `73%` vs `87%` on the single Task-3 repeat-1 draw, at `repeat = 5` both models scored **identical `13/15` unique (`65/75 = 86.7%`)** on `cot` and `direct_validator`, and Big Pickle outperformed Gemini on `react` (`64/75 = 85.3%` vs `51/75 = 68.0%`).
+2. **Gemini ReAct skipped tool calls on fault inputs:** On `fault-results.json`, Gemini `react` & `react-told` observed `SERVICE OUTPUT` on **0/4** runs because it stopped without calling `get_support_record`, whereas Big Pickle `react` & `react-told` (`fault-results-opencode.json`) observed `SERVICE OUTPUT` on **4/4** runs and still failed `0/4`. `scripts/fault-eval.ts` now supports `deliverEvidenceInPrompt` so future ReAct runs cannot bypass evidence collection.
+3. **OpenCode agent-runtime caching distorts token telemetry:** Big Pickle runs through OpenCode's agent runtime (session + system context + prompt caching), yielding `tokensIn` values from **2 to 20,948** in `eval-results-opencode-rep5.json` (`68` mean tokens on `direct_validator` vs `502` on `cot`). OpenCode token totals are **non-comparable** to raw Gemini API token counts.
+4. **Sampling temperature mismatch (`T=0.7` vs `undefined` → `T=0`):** Historical `rep5` Gemini runs used `T=0.7`, whereas OpenCode exposes no user-tunable temperature. `scripts/lib/gemini.ts` now defaults to **`T = 0`** for deterministic policy evaluation in future runs.
+5. **Rules baseline benchmark check:** Both models on `cot`/`direct_validator` match — and do not beat — a zero-LLM deterministic rule function (`13/15 = 86.7%`) on decidable structured facts; AI judgment only adds value on semantic/discretionary cases outside structured fields.
+
 ## Artifacts
 
-- `eval-results-gemini-task3.json` — matched Gemini, repeat=1, 3 arms.
-- `eval-results-opencode.json` — Big Pickle, repeat=1, 3 arms.
-- `fault-results-opencode.json` — fault test on Big Pickle.
-- v1 (repeat=2, all pipelines incl. router) preserved in `eval-results-v1.json`.
+- **Committed sanitized replay bundle (all tables above recomputable offline via `npm run replay`):** [`results/offline-replay-bundle.v2.json`](../results/offline-replay-bundle.v2.json)
+- Local gitignored raw sources archived into that bundle: `eval-results-gemini-task3.json`, `eval-results-opencode.json`, `eval-results-gemini-rep5.json`, `eval-results-opencode-rep5.json`, `fault-results.json`, `fault-results-opencode.json`, and `eval-results-v1.json`.

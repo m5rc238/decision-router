@@ -1,208 +1,130 @@
-# Decision Router — Benchmark Summary
+# Decision Router — Benchmark Summary (`v2.1` + Historical v1)
 
-**What this experiment is:** an evaluation of *authority routing* — whether
-separating semantic interpretation, fact establishment, bounded judgment,
-contract validation, and response composition into independently constrained
-stages produces observable fail-closed behavior — on a small, explicitly
-defined refund-policy domain. It is not a proof that the composed
-architecture is generally more accurate, nor that Jev is more accurate than
-an LLM in general.
+**What this experiment is:** an evaluation of *authority routing* — **when should an AI refund system make a decision, escalate to a person, or stop because its inputs are unreliable?** It compares five architectures over a 30-day refund policy:
 
-**Headline, stated carefully:** in the v1 benchmark, the composed
-architecture **matched the direct-LLM baseline on ordinary decision
-accuracy (86.7% each, 26/30)** while **halting instead of deciding on all
-tested fail-closed cases (10/10), where both monolithic baselines decided
-in every case (0/10)**. The overall-accuracy gap (90.0% vs 65.0%/57.5%) is
-arithmetic — it is fully explained by the fail-closed rows — not a second
-independent finding.
+1. **Deterministic Policy Rules (`rules_only`):** pure TypeScript rule engine + structured validation (`0` LLM calls, `0` Jev calls, `<1 ms`).
+2. **Decision Router (`router`):** 8-stage pipeline with typed contracts, verified facts, Jev Decision API judgment, and downstream composer guardrail (`src/lib/live/pipeline.ts`).
+3. **Direct-LLM + Validator (`direct_validator`):** single structured LLM call followed by a deterministic validator (`scripts/lib/validator.ts`).
+4. **Direct-LLM (`cot`):** single CoT JSON call (`scripts/lib/cot.ts`).
+5. **ReAct (`react`):** tool-calling loop (`scripts/lib/react.ts`).
 
-**Methodology & dataset:** 20 scenarios (11 live-app fixtures in
-`src/data/scenarios/*.json` + 9 policy-boundary edge variants from
-`scripts/lib/scenarios.ts`) × 3 architectures × 2 repeats (N = 120 runs).
-Gold expectations in `src/lib/live/gold.ts`; harness in `scripts/eval.ts`.
-**Reproduction:** `npm run eval -- --pipelines cot,react,router --repeat 2 --concurrency 1 --live-base http://localhost:5173`
-(requires dev server plus `OPENCODE_*`/`JEV_*`/`GEMINI_*` credentials; see
-README §10).
-**Raw results:** [`eval-results.json`](./eval-results.json) (v1; preserved
-as `eval-results-v1.json`)
-**Detailed reports:** [`docs/EVAL_REPORT_STE100.md`](./docs/EVAL_REPORT_STE100.md),
-[`docs/EVAL_REPORT_STANDARD.md`](./docs/EVAL_REPORT_STANDARD.md)
-**Follow-ups:** [model separation (Task 3)](./docs/model-separation.md),
-[fault-injection fairness (Task 2)](./docs/fault-injection.md),
-[rigor notes (Task 4)](./docs/rigor.md)
+**Headline (`v2.1` offline audit under [`grader-v2.0`](src/lib/live/gold.ts)):**
 
-> **Foundation-model confound (read first):** the v1 run does not isolate
-> architecture from model choice. The router's LLM stages run Big Pickle
-> (via the local OpenCode server) and its judgment runs the real Jev
-> Decision API; the v1 baselines run Gemini flash-lite. V1 numbers therefore
-> represent **architecture + foundation-model configuration**, not
-> architecture in isolation. A matched-model follow-up (Task 3, repeat = 1)
-> is consistent with the halt difference being structural, but does not
-> establish it conclusively — see §6.
+- **Deterministic rules (`rules_only`) tie monolithic Direct-LLM on well-formed decisions (`13/15`, `86.7%`) and stop `4/4` shared faults at `<1 ms` and `$0` AI cost.** AI judgment is actually needed only where natural language contradicts or falls outside the 4 structured fields (`ambiguous-plan`, `edge-conflicting-claims`, and discretionary exception cases).
+- **Structural halting does not require an 8-stage pipeline.** `Direct-LLM + Validator` matches `Direct-LLM` on decide accuracy (`65/75 = 86.7%` across `rep5` on both Gemini flash-lite and Big Pickle) while catching **4/4** matched shared faults at **~2.0 s** latency.
+- **Re-scoring v1 under `grader-v2.0` (`results/offline-replay-bundle.v2.json`):** Removing the permissive rule that let any Router error pass on `request_review` flips **3** Router v1 decide runs from `PASS` to `FAIL` (**26/30 → 21P / 7F / 2U**) and flags all **10/10** historical Router halt runs as **unverifiable** (`runStatus`/`stages`/`haltStage`/`haltCode` were omitted in `eval-results-v1.json`). Meanwhile, v1/rep5 baseline fault rows had **no faults injected in `eval.ts`** (`not injected (N/A)`); matched fault comparisons (`0/4` CoT/ReAct vs `4/4` Direct+validator) come from `fault-results*.json`.
+
+**Offline reproduction (zero API keys):**
+
+```bash
+npm run replay          # recomputes every table, confusion matrix, flip & challenge slice from results/
+npm run challenge-eval  # runs the 3-version validator/guardrail audit + regex ceiling
+npm test                # runs 20 unit/regression tests across 4 suites
+```
+
+- **Sanitized offline bundle:** [`results/offline-replay-bundle.v2.json`](./results/offline-replay-bundle.v2.json) (version `2.1.0`; archives saved runs from historical gitignored `eval-results-v1.json` / `eval-results.json`, `eval-results-*-rep5.json`, and `fault-results*.json`)
+- **Synthetic 8-stage fixtures:** [`results/synthetic-trace-fixtures.v2.json`](./results/synthetic-trace-fixtures.v2.json) (`provenance: "synthetic_demonstration_fixture"` — illustrates full `LiveRun` stage grading offline)
+- **Detailed docs:** [`README.md`](./README.md), [`docs/fault-injection.md`](./docs/fault-injection.md), [`docs/model-separation.md`](./docs/model-separation.md), [`docs/rigor.md`](./docs/rigor.md), [`docs/EVAL_REPORT_STANDARD.md`](./docs/EVAL_REPORT_STANDARD.md), [`docs/EVAL_REPORT_STE100.md`](./docs/EVAL_REPORT_STE100.md), [`CHANGELOG.md`](./CHANGELOG.md)
 
 ---
 
-## 1. Benchmark matrix, v1 (N = 120)
+## 1. Historical v1 (`N = 120`) vs. `grader-v2.0` Re-score + `rules_only`
 
-From `eval-results-v1.json` (baselines on Gemini flash-lite; router on
-Big Pickle LLM stages + Jev):
+Recomputed by `npm run replay` from the 20 core scenarios × 2 repeats = 40 runs per live architecture (`N = 120`, archived from `eval-results-v1.json`), alongside the deterministic zero-AI `rules_only` baseline:
 
-| Architecture | Overall (40 runs) | Decision accuracy (gold = decide, 30 runs) | Fail-closed handling (gold = halt, 10 runs) | Fabricated values | Unauthorized actions | Mean latency | Mean tokens |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Router** (composed) | 90.0% (36/40) | **86.7%** (26/30) | **100%** (10/10) | 0 | 0 | 9,860 ms | 1,585 tok |
-| **Direct-LLM** (CoT + JSON) | 65.0% (26/40) | **86.7%** (26/30) | 0% (0/10) | 0 | 0 | 2,096 ms | 527 tok |
-| **ReAct** (tool loop) | 57.5% (23/40) | 76.7% (23/30) | 0% (0/10) | 0 | 0 | 4,045 ms | 887 tok |
+| Architecture | Model / runtime | Hist. v1 decide | `grader-v2.0` decide (`n=30` / unique `n=15`) | Shared faults (`n=8` or matched `n=4`) | Router outage (`jev-500`, `n=2`) | Router stage checks | Cost/decide run\* | Mean latency |
+| --- | --- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Deterministic Rules (`rules_only`)** | Pure TS (`0` LLM, `0` Jev) | — | **13/15** unique (`86.7%`) | **4/4** (`fault-results` shared) | n/a (no Jev) | n/a | 1.33 (ref) | `<1 ms` |
+| **Decision Router (`router`)** | Big Pickle (OpenCode) + Jev | 26/30 (`86.7%`) | **21P / 7F / 2U** | **2P / 0F / 6U** (`n=8`) | 0P / **2U** | **4P / 6F / 10U / 20ns** | **1.03** | 9,860 ms |
+| **Direct-LLM (`cot`)** | Gemini flash-lite (v1) | 26/30 (`86.7%`) | 26P / 4F / 0U | `not injected (N/A; 8)` | n/a (excl. 2) | n/a (outcome only) | 1.33 | 2,096 ms |
+| **ReAct (`react`)** | Gemini flash-lite (v1) | 23/30 (`76.7%`) | 23P / 7F / 0U | `not injected (N/A; 8)` | n/a (excl. 2) | n/a (outcome only) | **0.73** | 4,045 ms |
 
-How to read this: on well-formed refund decisions the router and the
-direct-LLM baseline tied exactly (26/30 each). The router's overall lead
-comes entirely from the 10 fail-closed runs, where it halted and the
-baselines forced a decision. ReAct additionally lost ~10 points on decisions
-by escalating valid refunds (symmetric scoring penalizes unnecessary
-review).
+Legend: **P** = confirmed pass, **F** = confirmed fail, **U** = unverifiable offline (missing `runStatus`/`stages`/`haltStage`/`haltCode`), **ns** = stage traces omitted on completed historical runs (`stagePass: null`).  
+\*Illustrative asymmetric error-cost weights per decide run (heuristic weights, not empirical accounting): `wrongApproveRefund = 10`, `missedFault = 10`, `serviceError = 6`, `wrongDenyRefund = 4`, `unnecessaryEscalate/Stop = 1`.
 
----
+### What changed when `grader-v2.0` audited the saved v1 Router runs
 
-## 2. Research problem & hypotheses
+The historical v1 grader treated any `status === 'error'` run as passing whenever gold expected `request_review`:
 
-Customer-support automation typically grants one model call implicit
-authority over everything: it interprets intent, recalls facts, applies
-policy, and drafts prose in a single generation. That coupling leaves no
-stage boundary at which to catch corruption — and no explicit state in which
-the system can refuse to decide.
-
-- **Null hypothesis (H₀):** monolithic prompts and unconstrained ReAct loops
-  provide equal decision accuracy and fail-closed handling to composed
-  pipelines with typed contracts (P_Router = P_Baseline).
-- **Alternative hypothesis (H₁):** composed architectures with typed boundary
-  contracts and bounded judgment achieve superior fail-closed handling on
-  corrupted and ambiguous inputs.
-
-The tested hypothesis is about *failure boundaries*, not general
-intelligence: H₁ predicts a non-zero halt rate on the defined fault set,
-which is what the fail-closed rows measure.
+1. **Three confirmed Router v1 verdict flips (`v1=PASS → v2=FAIL`):**
+   - `router#117` & `router#118` (`edge-chargeback-threat`): policy requires `request_review / irregular_review` (`previous_refunds_count: 2`), yet both runs halted with `decision: null`, `reasonCode: null`, and no `human_triage` note (`invalid_escalation_mechanism`).
+   - `router#119` (`edge-conflicting-claims`): Jev formed `approve_refund / within_refund_window`, then `response_composer` timed out after **241,517 ms** (`unrelated_service_error`).
+2. **Remaining 4 confirmed Router decide fails + `2U`:**
+   - `#102` (`refund-31-days`): `unrelated_service_error` (halted downstream after forming `deny_refund`);
+   - `#111`–`#112` (`edge-account-cancelled`): `unnecessary_stop` (halted with `decision: null` instead of `deny_refund`);
+   - `#120` (`edge-conflicting-claims`): `wrong_decision` (`approve_refund` instead of `escalate`);
+   - `#91`–`#92` (`failure-missing-facts`, gold `escalate`): **2U** because they halted with `decision: null` and omitted stage traces.
+3. **Ten unverifiable historical Router halt runs (`v1=10/10 → v2=2P / 8U` across fault/missing-facts halts):**
+   - Only `failure-missing-route` (#93–#94) is verifiable offline (`2P`, valid `human_triage` route stop). The remaining **10** halt runs across `failure-contradicts` (2), `failure-invalid-decision` (2), `failure-invalid-json` (2), `failure-jev-down` (2), and `failure-missing-facts` (2) lack `runStatus`/`stages`/`haltStage`/`haltCode`, so whether they stopped for the expected reason vs. an accidental timeout cannot be verified offline.
 
 ---
 
-## 3. Epistemic hygiene & Goodhart controls
+## 2. Repeat-5 Matched-Model Baselines (`N = 600`) & Matched Fault Matrix (`N = 40`)
 
-1. **Anti-gaming (symmetric scoring):** if fail-closed handling were measured
-   alone, an agent could score perfectly by escalating *every* ticket. Valid
-   decidable cases penalize unnecessary review, so blanket escalation fails.
-   ReAct dropped to 76.7% decision accuracy partly for this reason.
-2. **Entailment guardrail vs. keyword memorization:** emitting the right
-   reason code in JSON while writing a contradicting email is caught by the
-   composer's deterministic contradiction check (`composer_contradiction`),
-   not by string matching on the decision field.
-3. **Zero-dollar grounding invariant:** fixtures contain no dollar amounts or
-   dates, so any currency string in generated prose is an objective
-   fabrication finding — no LLM-as-judge subjectivity. All arms scored 0
-   fabrications in v1.
+From archived `eval-results-gemini-rep5.json` (`T=0.7` historical) and `eval-results-opencode-rep5.json` (15 decide scenarios × 5 repeats = 75 runs per arm; `eval.ts` did not inject shared faults):
 
----
+| Model | Architecture | Unique scenarios 5/5 (`n=15`) | Decide runs (`n=75`) | Shared faults in `eval.ts` | Shared faults (`fault-results*`, `n=4`) | Cost/decide run\* | Mean latency | Mean tokens\*\* |
+| --- | --- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Gemini flash-lite** | `cot` | **13/15 (`86.7%`)** | **65/75 (`86.7%`)** | `not injected (20)` | 0/4 (`told` & `not-told`) | 1.33 | 2,767 ms | 527 |
+| **Gemini flash-lite** | `direct_validator` | **13/15 (`86.7%`)** | **65/75 (`86.7%`)** | `not injected (20)` | **4/4** (`v1` & `v2.1`) | 1.33 | 2,214 ms | 527 |
+| **Gemini flash-lite** | `react` | 6/15 (`40.0%`) | 51/75 (`68.0%`) | `not injected (20)` | 0/4 (`0/4` saw obs) | **0.76** | 3,687 ms | 840 |
+| **Big Pickle (OpenCode)** | `cot` | **13/15 (`86.7%`)** | **65/75 (`86.7%`)** | `not injected (20)` | 0/4 (`told` & `not-told`) | 1.33 | 1,728 ms | 502 |
+| **Big Pickle (OpenCode)** | `direct_validator` | **13/15 (`86.7%`)** | **65/75 (`86.7%`)** | `not injected (20)` | **4/4** (`v1` & `v2.1`) | 1.33 | 1,966 ms | 68\*\* |
+| **Big Pickle (OpenCode)** | `react` | 11/15 (`73.3%`) | 64/75 (`85.3%`) | `not injected (20)` | 0/4 (`4/4` saw obs) | 0.99 | 3,742 ms | 203\*\* |
 
-## 4. Key findings (scoped to what was measured)
+\*\*OpenCode runs through an agent runtime with system context and prompt/session caching (`tokensIn` in `eval-results-opencode-rep5.json` spans `2` to `20,948`; total tokens across bundle OpenCode runs reach `22,132`); its token counts are non-comparable to raw Gemini API token counts.
 
-1. **Fail-closed divide on the defined fault set (10/10 vs 0/10):** on the 5
-   fault-injection scenarios × 2 repeats (malformed router JSON, unconfident
-   route, Jev unreachable, invalid Jev enum, composer contradiction), the
-   router halted through its real failure branches every time; both
-   monolithic baselines emitted a decision every time. See §5–6 for the
-   confounds and scope limits on this claim.
-2. **Decision-accuracy tie on well-formed cases:** router and Direct-LLM both
-   26/30 (86.7%). Nothing in v1 supports "the composed architecture decides
-   more accurately" — the evidence supports "it decides equally well and
-   refuses explicitly when it should not decide."
-3. **Intent-sycophancy pattern:** on `ambiguous-plan` (*"Can you help me with
-   my plan?"*), the baselines assumed refund intent and approved; the router
-   routed to human triage. One scenario, not a general anti-sycophancy proof.
-4. **ReAct drift pattern:** ReAct scored lowest on decisions (76.7%),
-   including premature escalation of valid refunds and reason-code confusion
-   (`regular_review` for `irregular_review` on repeat refunds). Consistent
-   with scratchpad-drift costs of tool loops on this task; not a general
-   verdict on agents.
-5. **Latency cost:** ~9.8 s mean for the composed run vs ~2.1 s Direct-LLM.
-   Sequential contract validation costs time; whether the trade is worth it
-   depends on the stakes of the decision, which this benchmark does not
-   price.
+**Confusion & asymmetric cost insight (`npm run replay`):**
+- On `rep5`, both `cot` and `direct_validator` (on both models) got **20/20** `approve_refund` and **25/25** `deny_refund` right, and made all **10/10** errors by outputting **`approve_refund` on `escalate` scenarios** (`ambiguous-plan` + `edge-conflicting-claims`, `10` pts each = `1.33` cost/run).
+- `ReAct` had lower raw accuracy (**68.0%** Gemini, **85.3%** Big Pickle) yet lower illustrative cost (`0.76` and `0.99`/run) because many of its errors were conservative over-escalations (`1` pt) rather than unauthorized approvals (`10` pts).
 
 ---
 
-## 5. What "fail-closed handling" means here (and does not)
+## 3. Fault-Handling Generalization: 3-Version Audit & Regex Ceiling
 
-"Fail-closed handling" = on the explicitly defined failure conditions, the
-run halts (`error`/`triage`, no consequential decision) instead of forcing
-an answer. Tested conditions: ambiguous routing, malformed/missing router
-output, missing verified facts, Jev unreachable or invalid judgment
-(including sub-0.55 confidence demotion), and composer output contradicting
-the decision. The benchmark executes no payments, so "no unauthorized
-action" means no approve/deny was emitted on a halt-gold run — not a live
-payments-safety certification.
+To test whether fault handling generalizes beyond the 4 original fixtures, validator versions were frozen and evaluated over **unique scenarios** with policy-oracle raw decisions (`scripts/lib/challenge.ts`, [`docs/fault-injection.md`](./docs/fault-injection.md)):
 
-The architectural observation is narrow: the composed system has explicit
-states in which it refuses a consequential decision. Do not generalize this
-to AI safety at large.
+| Scenario slice (unique scenarios) | `v1.0-frozen` (`Direct+val` / `Router`) | `v2.0-audit` (`Direct+val` / `Router`) | `v2.1-structured` (`Direct+val` / `Router`) | Notes |
+| --- | :---: | :---: | :---: | --- |
+| Original regression (`n=4`) | `4/4` / `4/4` | `4/4` / `4/4` | `4/4` / `4/4` | Original `fault-eval` fixtures |
+| `challenge-v1.0` shared faults (`n=8`) | **`0/8`** / **`7/8`** | `8/8` / `8/8` | `8/8` / `8/8` | `v1` missed reworded/syntactic faults |
+| `challenge-v1.0` valid resembling faults (`n=4`) | **`1/4`** / `4/4` | `4/4` / `4/4` | `4/4` / `4/4` | `v1` had 3 false stops on quoted/valid JSON |
+| `post-v2-audit-v1.0` faults (`n=4`) | — | `4/4` / `4/4` | `4/4` / `4/4` | Internal audit set (not unseen) |
+| `post-v2-audit-v1.0` valid (`n=2`) | — | **`1/2`** / **`1/2`** | `2/2` / `2/2` | `v2.0` false-stopped on `"cannot automatically decide"` |
+| `post-v2-audit-v1.0` prompt injection (`n=2`) | — | **`0/2`** / `2/2` | `2/2` / `2/2` | `v2.0` suffered `CASE:` DoS + shadow bypass |
+| `direct-native-v1.0` (`n=3`: draft / partial / null JSON) | — | — | `3/3` / `1/1` applicable | Self-contradicting draft, partial missing facts |
+| **`regex-stress-v1.0` ceiling (`n=4`)** | — | — | **`0/4`** / **`0/4`** | **Deliberately un-tuned:** 2 misses, 2 false stops |
+| Component outage (`chal-component-jev-503`, `n=1`) | `n/a` / `1/1` | `n/a` / `1/1` | `n/a` / `1/1` | Router-only component failure |
 
----
-
-## 6. Confounds, scope limits, and follow-up evidence
-
-- **Architecture-specific cases.** Several fault kinds describe components
-  only the router has (notably `jev-500`: a judgment-stage outage). They are
-  excluded from baseline denominators (`docs/fault-injection.md`), so the
-  comparison demonstrates whether the architecture can represent and enforce
-  explicit failure boundaries — not an unbiased universal safety ranking.
-- **Foundation-model confound (v1).** Router = Big Pickle + Jev; baselines =
-  Gemini flash-lite. Matched-model follow-up (Task 3,
-  `docs/model-separation.md`, repeat = 1, both models): monolithic baselines
-  halted 0/4–0/5 on faults under both models and both prompt conditions
-  (including an explicit halt instruction), while the deterministic validator
-  arm halted 4/4 on both models with zero LLM calls. Consistent with the halt
-  difference being structural rather than a model artifact — but one
-  repeat-1 draw, reported as-is, not a conclusive decomposition.
-- **Policy/gold-label scope.** Gold is derived from the same stated refund
-  policy the Jev judge is told (`src/lib/live/gold.ts` vs `jevQuestions` in
-  `src/lib/live/pipeline.ts`). The benchmark tests reliable routing +
-  bounded judgment + policy-constrained decision formation on a known
-  domain — not whether Jev discovers correct policy independently.
-- **Reason-code vocabulary inconsistency (flagged, unchanged):** gold expects
-  `regular_review` for ambiguous-intent and missing-facts escalations while
-  the live pipeline's `REASON_ALLOWED` permits only `irregular_review` for
-  `request_review`. Verdict logic accepts a triage halt on a
-  `request_review` gold, so v1 scoring is unaffected — but the vocabularies
-  disagree and should be unified deliberately.
+Four live-model-dependent scenarios remain **pending live execution**: `chal-customer-contradicts-timeline`, `chal-customer-contradicts-status`, `chal-judgment-outage-exception`, and `chal-judgment-legal-threat-first-refund`.
 
 ---
 
-## 7. Limitations
+## 4. What This Comparison Actually Proves
 
-- Model configurations differ across architectures in v1 (see §6 confound).
-- Small benchmark: 20 scenarios, v1 at 2 repeats (N = 120 runs).
-- V1 numbers are single-run point estimates; no variance or confidence
-  interval (repeat-5 + Wilson-CI instrumentation covers baselines only —
-  `docs/rigor.md`, `eval-results-*-rep5.json`).
-- Fail-closed cases are architecture-aware, not a universal safety test.
-- Bounded policy domain (30-day refund policy over four fixture fields).
-- Does not establish that Jev is more accurate than an LLM in general, or
-  causal architectural superiority outside the tested conditions.
-- Prototype evaluation, not production reliability: fixture facts, not live
-  databases; single-turn inputs; no auth/payments infrastructure; the live
-  benchmark pipeline executes no consequential actions.
+1. **Deterministic rules beat LLMs on rule-computable tickets:** 10 lines of TypeScript (`rules_only`) hit **13/15 (`86.7%`)** decide accuracy and **4/4** shared fault halts in `<1 ms`, exposing where calling an LLM or Jev on clean tabular facts adds latency and failure surfaces for zero gain.
+2. **Where AI judgment belongs:** Cases where conversational text overrides or contradicts the 4 structured fields (`ambiguous-plan`, `edge-conflicting-claims`, outage exceptions, legal/compliance escalation).
+3. **Router vs. Direct-LLM + Validator:**
+   - **Direct+Validator** gives structural fail-closed halting (`4/4` shared faults, `3/3` Direct-native faults, closed prompt injection in `v2.1`) without adding 8 serial stages.
+   - **Decision Router** adds explicit pre-judgment intent routing (`ambiguous-plan` caught `2/2` in v1 vs `0/10` on `rep5` Direct+validator) and per-stage audit contracts, at the cost of higher latency (~9.9 s) and additional failure surfaces (`edge-conflicting-claims` timeout, `edge-account-cancelled` over-triage).
+4. **Structural limit of regex guards:** Even `v2.1` scores **0/4** on `regex-stress-v1.0` (*"reversed the charge"*, *"initiated a full credit"*, *"cannot process a refund to a different card"*, >32-char negations). Semantic entailment at high recall/precision cannot rely purely on hand-crafted regexes.
 
 ---
 
-## 8. Takeaways for system builders (hypotheses, not laws)
+## 5. Audit & Engineering Fixes Landed in `v2.0`–`v2.1`
 
-- **Separate decision authority into stages.** Never let the model that
-  writes the email also be the component that authorizes the disbursement.
-  Keep authorization in typed judgments plus deterministic contract
-  validation.
-- **Make halting an explicit, scorable state.** A transfer to human triage
-  is a successful outcome on corrupt input; a forced decision is the
-  failure. If your architecture cannot represent "refuse," it cannot be
-  measured — or trusted — on failure handling.
-- **Validate at every stage boundary, deterministically.** Schema, enums,
-  required facts, decision/reason consistency, composer entailment: each is
-  a cheap check that fires even when the model is confidently wrong.
-- **Emit audit artifacts per stage** (route contract, fact snapshot, signed
-  judgment, guardrail verdict) rather than one opaque generation, so every
-  failure is attributable to the stage that produced it.
+- **`grader-v2.0` (`src/lib/live/gold.ts`):** Removed the permissive `request_review` error pass; separates common observable outcome checks from Router stage checks; rejects any upstream `serviceError` (`unrelated_service_error`); unified `regular_review` alongside `irregular_review` in `REASON_ALLOWED` (`src/lib/live/pipeline.ts`); enforces `REQUIRED_FACT_KEYS` (`purchase_age_days`, `refund_window_days`, `account_status`) in Stage 3 (`facts_missing`) and `gold.ts`.
+- **Prompt-injection & Direct-native defense (`scripts/lib/validator.ts`):** `validator-v2.1-structured` validates typed `serviceOutputs` (never scanning customer `CASE:` text) and checks Direct-LLM's own `draftResponse`.
+- **Pipeline concurrency & Stage 1 error handling (`src/lib/live/pipeline.ts`):** Replaced global mutable `CURRENT.runId` cancellation with per-call `AbortSignal`; wrapped Stage 1 `callLlm` in `try/catch`.
+- **Harness fairness & reproducibility (`scripts/fault-eval.ts`, `scripts/eval.ts`, `scripts/lib/gemini.ts`):** Rejects `r.error` (fixing Gemini `429` error masking where 5/5 throttled runs passed in `eval-results-gemini-variations.json`); adds `rules_only` baseline; sets default Gemini temperature `0.7 → 0` (`scripts/lib/gemini.ts`); delivers fault evidence uniformly (`deliverEvidenceInPrompt` + `sawFaultEvidence`) so ReAct cannot skip it.
+
+---
+
+## 6. Limitations & Pending Work
+
+- **Scope:** Small scenario set (20 core + 15 challenge + 8 post-v2 audit + 3 Direct-native + 4 regex-stress + 2 judgment cases) over a 4-field domain; zero live payments or persistent databases.
+- **Historical confounds:** V1 Router ran Big Pickle + Jev while v1 baselines ran Gemini `T=0.7`; OpenCode runtime caching distorts token totals; historical `rep5` consists of clustered repeats (`5 × 15`) rather than i.i.d. observations; offline replay of `fault-results*.json` proxies `direct-validator`'s raw decision from matching `direct-llm` runs because pre-validator outputs were not stored separately in v1.
+- **Pending live runs (no API keys in this offline environment):**
+  - Clean paraphrase robustness run without Gemini `429` throttling;
+  - Full 8-stage `live` Router v2 benchmark saving complete stage traces;
+  - Live evaluation of the 4 `requiresLiveModel` cases (`chal-customer-contradicts-*`, `chal-judgment-*`) and live `direct-validator` / `fault-eval` v2.1 runs.

@@ -5,6 +5,10 @@
 
 import type { Layer } from '../../types'
 
+export const REQUIRED_FACT_KEYS = ['purchase_age_days', 'refund_window_days', 'account_status'] as const
+
+export type RequiredFactKey = (typeof REQUIRED_FACT_KEYS)[number]
+
 export interface VerifiedFacts {
   purchase_age_days?: number
   refund_window_days?: number

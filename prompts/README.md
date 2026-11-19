@@ -14,6 +14,4 @@ archival records so each condition is reproducible.
 The halt clause is word-for-word identical in both v2 prompts:
 > If the input is corrupt, incomplete, or the intent is ambiguous, output halt instead of a decision.
 
-Note: unlike the monolithic baselines, the Decision Router and the Direct+validator arm need no
-prompt change — halting is handled by deterministic stages (the guardrail), documented in
-`docs/fault-injection.md`.
+Note: unlike the monolithic baselines, the Decision Router and the Direct+validator arm need no prompt change — halting is handled by deterministic stages. In v2.1, `validator-v2.1-structured` validates structured `serviceOutputs` (without scanning customer `CASE:` text, closing prompt-injection attacks) plus Direct-LLM's own `draftResponse`, and `scripts/fault-eval.ts` supports `deliverEvidenceInPrompt` so ReAct cannot skip injected fault evidence by omitting `get_support_record`. See [`../docs/fault-injection.md`](../docs/fault-injection.md).

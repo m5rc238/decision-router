@@ -1,42 +1,32 @@
-// TASK 2d — Fault-test diagnostic for the baseline arms.
+// Fault-test diagnostic for the baseline arms (updated to grader-v2.0 and
+// validator-v2.1-structured).
 //
-// Runs the DOWNSTREAM-FAULT scenarios (the 5 fault-injected fixtures the live
-// router fail-closes on) against the monolithic baselines and the Direct+validator
-// arm, with the fault payload injected into each arm's OWN evidence channel:
-//   direct-llm / direct-validator : SERVICE OUTPUT block appended to the prompt
-//   react                         : fault text on the get_support_record observation
+// Delivers identical fault evidence to every applicable arm:
+//   direct-llm / direct-validator : SERVICE OUTPUT block + structured serviceOutputs
+//   react                         : fault evidence delivered in initial prompt AND
+//                                   recorded via sawFaultEvidence so ReAct cannot
+//                                   silently bypass it by skipping tool calls
 //
-// Two prompt conditions, otherwise identical prompts & injection:
-//   not-told  = ORIGINAL v1 prompts (no "halt" option)  → direct-llm, react
-//   told      = v2 prompts (halt clause, word-for-word identical across arms)
-//               → direct-llm-told, react-told
-// Plus direct-validator: the not-told direct-llm prompt followed by the
-// deterministic validator (NO LLM calls) from lib/validator.ts.
-//
-// Applicability (documented in docs/fault-injection.md):
-//   - jev-500 (Jev outage) is NOT APPLICABLE to the baselines/validator: they
-//     have no Jev stage. It stays in the router reference only.
-//   - Every other fault kind is injected for every arm.
-//
-// The gold expectation for ALL fault scenarios is halt. A run is PASS iff the
-// arm emitted halt. Output: fault-results.json + a markdown matrix (task 2d's
-// "two tables": not-told + told), plus a router reference row read from the
-// preserved eval-results-v1.json (router's REAL failure branches).
-//
-// TASK 3: --model gemini|opencode selects the baseline model. This keeps the
-// fault test runnable on the SAME model the Router uses (Big Pickle via
-// OpenCode) so architecture and model stay separable there too.
+// Any upstream API error (`r.error`) is graded via `verdictForOutcome` and ALWAYS
+// fails as `unrelated_service_error` rather than masking as a passing halt.
+// Router reference is read from the committed sanitized bundle
+// `results/offline-replay-bundle.v2.json`.
 
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import type { Scenario } from '../src/lib/live/types'
-import { goldForScenario } from '../src/lib/live/gold'
+import { goldForScenario, GRADER_VERSION, verdictForOutcome, verdictForSavedRouterRun } from '../src/lib/live/gold'
 import { loadEnvLocal } from './lib/env'
 import { benchmarkScenarioSet } from './lib/scenarios'
 import { APPLICABLE_TO_BASELINES, FAULT_KIND_LABEL, FAULT_SCENARIO_ID, faultPayload } from './lib/faults'
 import { runCoT } from './lib/cot'
 import { runReact } from './lib/react'
-import { validateDirectModel, applyValidator } from './lib/validator'
+import {
+  applyValidator,
+  validateDirectModel,
+  VALIDATOR_V2_1_VERSION,
+} from './lib/validator'
+import { runDeterministicPolicy } from './lib/rules'
 import { MODEL_LABEL } from './lib/llm'
 import type { BaselineOutcome } from './lib/types'
 import type { ModelKey } from './lib/llm'
@@ -46,7 +36,6 @@ loadEnvLocal()
 
 const A = process.argv.slice(2)
 const args = parseArgs(A)
-// Never write into the main benchmark results file.
 if (!A.includes('--out')) args.out = 'fault-results.json'
 if (args.out === 'eval-results.json') args.out = 'fault-results.json'
 
@@ -59,15 +48,13 @@ if (A.includes('--help')) {
   process.exit(0)
 }
 
-// ---------------------------------------------------------------------------
-// Arms
-
 const ARMS = {
   'direct-llm': { mode: 'not-told' as const, style: 'cot' as const, label: 'Direct-LLM (not-told, v1)' },
   'direct-llm-told': { mode: 'told' as const, style: 'cot' as const, label: 'Direct-LLM (told, v2)' },
   react: { mode: 'not-told' as const, style: 'react' as const, label: 'ReAct (not-told, v1)' },
   'react-told': { mode: 'told' as const, style: 'react' as const, label: 'ReAct (told, v2)' },
-  'direct-validator': { mode: 'not-told' as const, style: 'cot' as const, label: 'Direct+validator' },
+  'direct-validator': { mode: 'not-told' as const, style: 'cot' as const, label: 'Direct+validator (v2.1)' },
+  'rules-only': { mode: 'not-told' as const, style: 'rules' as const, label: 'Deterministic rules' },
 } as const
 type ArmId = keyof typeof ARMS
 
@@ -76,13 +63,16 @@ interface FaultRun {
   scenarioId: string
   faultKind: string
   mode: 'not-told' | 'told'
-  model: ModelKey
+  model: ModelKey | 'deterministic'
   modelLabel: string
   gold: string
   decision: string | null
   reasonCode: string | null
+  validatorVersion?: string
   validatorHalted?: boolean
+  sawFaultEvidence: boolean
   pass: boolean
+  classification: string
   ms: number
   tokensIn: number
   tokensOut: number
@@ -92,35 +82,76 @@ interface FaultRun {
   injected: string
 }
 
-const goldByScenario = new Map<string, ReturnType<typeof goldForScenario>>()
-
 async function runArm(scenario: Scenario, arm: ArmId, injectFault: string): Promise<FaultRun> {
   const cfg = ARMS[arm]
   const gold = goldForScenario(scenario)
-  goldByScenario.set(scenario.id, gold)
   const model: ModelKey = args.model
+  const kind = injectFault as Parameters<typeof faultPayload>[0]
+  const stage = scenario.fault?.stage ?? 'untagged'
   const base = {
     arm,
     scenarioId: scenario.id,
     faultKind: injectFault,
     mode: cfg.mode,
-    model,
-    modelLabel: MODEL_LABEL[model],
-    gold: `halt`,
+    model: cfg.style === 'rules' ? ('deterministic' as const) : model,
+    modelLabel: cfg.style === 'rules' ? 'Deterministic TS Rules' : MODEL_LABEL[model],
+    gold: 'stop',
   }
-  const kind = injectFault as Parameters<typeof faultPayload>[0]
 
-  let outcome: BaselineOutcome
-  let r: Awaited<ReturnType<typeof runCoT>>
-
-  if (cfg.style === 'react') {
-    const rr = await runReact(scenario, { mode: cfg.mode, injectFault: kind, model })
-    outcome = rr.outcome
+  if (cfg.style === 'rules') {
+    const res = runDeterministicPolicy(scenario, {
+      serviceOutputs: [{ stage, payload: faultPayload(kind) }],
+    })
+    const gv = verdictForOutcome(
+      {
+        decision: res.outcome.decision,
+        reasonCode: res.outcome.reasonCode,
+        halted: res.halted,
+        validatorReason: res.reason,
+      },
+      gold,
+    )
     return {
       ...base,
-      decision: outcome.decision,
-      reasonCode: outcome.reasonCode,
-      pass: outcome.decision === 'halt',
+      decision: res.outcome.decision,
+      reasonCode: res.outcome.reasonCode,
+      validatorVersion: VALIDATOR_V2_1_VERSION,
+      validatorHalted: res.halted,
+      sawFaultEvidence: true,
+      pass: gv.pass,
+      classification: gv.classification,
+      ms: res.ms,
+      tokensIn: 0,
+      tokensOut: 0,
+      evidence: faultPayload(kind),
+      prompt: '',
+      injected: faultPayload(kind),
+    }
+  }
+
+  if (cfg.style === 'react') {
+    const rr = await runReact(scenario, {
+      mode: cfg.mode,
+      injectFault: kind,
+      deliverEvidenceInPrompt: true,
+      model,
+    })
+    const gv = verdictForOutcome(
+      {
+        decision: rr.outcome.decision,
+        reasonCode: rr.outcome.reasonCode,
+        halted: rr.outcome.decision === 'halt',
+        serviceError: rr.error,
+      },
+      gold,
+    )
+    return {
+      ...base,
+      decision: rr.outcome.decision,
+      reasonCode: rr.outcome.reasonCode,
+      sawFaultEvidence: rr.sawFaultEvidence,
+      pass: gv.pass,
+      classification: gv.classification,
       ms: rr.ms,
       tokensIn: rr.tokensIn,
       tokensOut: rr.tokensOut,
@@ -131,31 +162,45 @@ async function runArm(scenario: Scenario, arm: ArmId, injectFault: string): Prom
     }
   }
 
-  r = await runCoT(scenario, { mode: cfg.mode, injectFault: kind, model })
-  outcome = r.outcome
+  const r = await runCoT(scenario, { mode: cfg.mode, injectFault: kind, model })
+  let outcome: BaselineOutcome = r.outcome
+  let validatorHalted: boolean | undefined
+  let validatorVersion: string | undefined
+  let validatorReason: string | null | undefined
+
   if (arm === 'direct-validator') {
-    const validator = validateDirectModel(outcome, scenario.facts, r.evidence)
+    const validator = validateDirectModel(outcome, scenario.facts, r.evidence, {
+      version: 'v2.1',
+      serviceError: r.error,
+      serviceOutputs: [{ stage, payload: faultPayload(kind) }],
+      draftResponse: r.draftResponse,
+    })
     outcome = applyValidator(outcome, validator)
-    return {
-      ...base,
+    validatorHalted = validator.halted
+    validatorVersion = validator.version
+    validatorReason = validator.reason
+  }
+
+  const gv = verdictForOutcome(
+    {
       decision: outcome.decision,
       reasonCode: outcome.reasonCode,
-      validatorHalted: validator.halted,
-      pass: outcome.decision === 'halt',
-      ms: r.ms,
-      tokensIn: r.tokensIn,
-      tokensOut: r.tokensOut,
-      error: r.error,
-      evidence: r.evidence,
-      prompt: r.evidence,
-      injected: faultPayload(kind),
-    }
-  }
+      halted: outcome.decision === 'halt',
+      validatorReason,
+      serviceError: r.error,
+    },
+    gold,
+  )
+
   return {
     ...base,
     decision: outcome.decision,
     reasonCode: outcome.reasonCode,
-    pass: outcome.decision === 'halt',
+    ...(validatorVersion ? { validatorVersion } : {}),
+    ...(validatorHalted !== undefined ? { validatorHalted } : {}),
+    sawFaultEvidence: true,
+    pass: gv.pass,
+    classification: gv.classification,
     ms: r.ms,
     tokensIn: r.tokensIn,
     tokensOut: r.tokensOut,
@@ -166,32 +211,47 @@ async function runArm(scenario: Scenario, arm: ArmId, injectFault: string): Prom
   }
 }
 
-// ---------------------------------------------------------------------------
-// Router reference (from the preserved v1 eval, real failure branches)
-
-function readRouterReference(): { haltPass: number; haltTotal: number } | null {
+function readRouterReference(): {
+  v1HistoricalPass: number
+  v2ConfirmedPass: number
+  v2Unverifiable: number
+  total: number
+} | null {
   try {
-    const raw = JSON.parse(readFileSync(resolve('eval-results-v1.json'), 'utf8')) as {
-      runs: Array<{
+    const bundle = JSON.parse(readFileSync(resolve('results/offline-replay-bundle.v2.json'), 'utf8')) as {
+      v1MainRuns: Array<{
         pipeline: string
         scenarioId: string
+        decision: string | null
+        reasonCode: string | null
         halted: boolean
-        pass: boolean
+        v1Pass: boolean
+        actions?: string[]
+        error?: string
       }>
     }
-    const faultIds = Object.values(FAULT_SCENARIO_ID)
-    const runs = raw.runs.filter((x) => x.pipeline === 'router' && faultIds.includes(x.scenarioId))
+    const faultIds = new Set(Object.values(FAULT_SCENARIO_ID))
+    const byId = new Map(benchmarkScenarioSet().map((s) => [s.id, s]))
+    const runs = bundle.v1MainRuns.filter((x) => x.pipeline === 'router' && faultIds.has(x.scenarioId))
+    let v2ConfirmedPass = 0
+    let v2Unverifiable = 0
+    for (const r of runs) {
+      const s = byId.get(r.scenarioId)
+      if (!s) continue
+      const audit = verdictForSavedRouterRun(r, goldForScenario(s))
+      if (!audit.verifiable) v2Unverifiable++
+      else if (audit.pass) v2ConfirmedPass++
+    }
     return {
-      haltPass: runs.filter((x) => x.pass).length,
-      haltTotal: runs.length,
+      v1HistoricalPass: runs.filter((x) => x.v1Pass).length,
+      v2ConfirmedPass,
+      v2Unverifiable,
+      total: runs.length,
     }
   } catch {
     return null
   }
 }
-
-// ---------------------------------------------------------------------------
-// Build the task matrix
 
 const scenarioSet = benchmarkScenarioSet()
 const byId = new Map(scenarioSet.map((s) => [s.id, s]))
@@ -225,41 +285,32 @@ await mapPool(tasks, args.concurrency, async (task) => {
   const run = await task()
   runs.push(run)
   if (!args.quiet) {
-    console.log(`${run.pass ? 'HALT' : 'DEC  '} ${String(run.arm).padEnd(16)} ${run.scenarioId.padEnd(22)} got=${run.decision ?? '—'} ${run.pass ? 'PASS' : 'FAIL'} ${run.error ?? ''}`.trim())
+    console.log(
+      `${run.pass ? 'STOP' : 'FAIL'} ${String(run.arm).padEnd(16)} ${run.scenarioId.padEnd(22)} got=${run.decision ?? '—'} [${run.classification}] ${run.error ?? ''}`.trim(),
+    )
   }
 })
 
-// ---------------------------------------------------------------------------
-// Aggregate into the two tables
+const NOT_TOLD: ArmId[] = ['direct-llm', 'react', 'direct-validator', 'rules-only']
+const TOLD: ArmId[] = ['direct-llm-told', 'react-told']
 
-const NOT_TOLD: Array<{ arm: ArmId; armKey: string }> = [
-  { arm: 'direct-llm', armKey: 'direct-llm' },
-  { arm: 'react', armKey: 'react' },
-  { arm: 'direct-validator', armKey: 'direct-validator' },
-]
-const TOLD: Array<{ arm: ArmId; armKey: string }> = [
-  { arm: 'direct-llm-told', armKey: 'direct-llm-told' },
-  { arm: 'react-told', armKey: 'react-told' },
-]
-
-function tableRows(arms: Array<{ arm: ArmId; armKey: string }>): string[] {
-  const header = 'fault (injected) | ' + arms.map((x) => ARMS[x.arm].label).join(' | ')
+function tableRows(arms: ArmId[]): string[] {
+  const header = 'fault (injected) | ' + arms.map((arm) => ARMS[arm].label).join(' | ')
   const sep = '--- | ' + arms.map(() => '---').join(' | ')
   const lines = [header, sep]
   for (const kind of APPLICABLE_TO_BASELINES) {
-    const cells = arms.map(({ arm }) => {
+    const cells = arms.map((arm) => {
       const row = runs.find((x) => x.arm === arm && x.faultKind === kind)
       if (!row) return '—'
-      const mark = row.pass ? 'HALT ✓' : `${row.decision ?? 'decided'} ✗`
+      const mark = row.pass ? 'STOP ✓' : `${row.decision ?? 'error'} ✗`
       return `${mark}${row.error ? ` (err ${row.error})` : ''}`
     })
     lines.push(`${FAULT_KIND_LABEL[kind]} | ${cells.join(' | ')}`)
   }
   const ref = readRouterReference()
   if (ref) {
-    lines.push(
-      `${FAULT_KIND_LABEL['jev-500']} + all (router reference) | ${arms.map(() => ref.haltTotal ? `${ref.haltPass}/${ref.haltTotal} (${Math.round(100 * ref.haltPass / ref.haltTotal)}%)` : 'n/a').join(' | ')}`,
-    )
+    const label = `v1 hist ${ref.v1HistoricalPass}/${ref.total}; v2 ${ref.v2ConfirmedPass}P/${ref.v2Unverifiable}U`
+    lines.push(`${FAULT_KIND_LABEL['jev-500']} + all (router reference) | ${arms.map(() => label).join(' | ')}`)
   }
   return lines
 }
@@ -267,58 +318,37 @@ function tableRows(arms: Array<{ arm: ArmId; armKey: string }>): string[] {
 const notToldTable = tableRows(NOT_TOLD)
 const toldTable = tableRows(TOLD)
 
-console.log('\n— FAULT TEST, NOT-TOLD (v1 prompts) —')
-console.log(`model: ${MODEL_LABEL[args.model]}. gold for every row: halt (fail closed). Direct+validator = v1 prompt + deterministic validator, no LLM.`)
+console.log(`\n— FAULT TEST (${GRADER_VERSION}, ${VALIDATOR_V2_1_VERSION}), NOT-TOLD —`)
 console.log(notToldTable.join('\n'))
-
-console.log('\n— FAULT TEST, TOLD (v2 prompts: halt clause) —')
-console.log(`model: ${MODEL_LABEL[args.model]}. gold for every row: halt (fail closed). Told versions differ from not-told ONLY via the halt clause.`)
+console.log(`\n— FAULT TEST (${GRADER_VERSION}), TOLD —`)
 console.log(toldTable.join('\n'))
-
-console.log('\napplicability: jev-500 (Jev outage) is not applicable to baselines/validator — no Jev stage exists;')
-console.log('it runs only in the router reference (real failure branch). Excluded from baseline scores.')
-
-// ---------------------------------------------------------------------------
-// Persist
 
 const out = {
   task: 'fault-test-diagnostic',
-  stage: 'task2d',
+  graderVersion: GRADER_VERSION,
+  validatorVersion: VALIDATOR_V2_1_VERSION,
   generatedAt: new Date().toISOString(),
   model: process.env.GEMINI_MODEL ?? 'gemini-flash-lite-latest',
   baselineModel: args.model,
   baselineModelLabel: MODEL_LABEL[args.model],
-  promptVersions: {
-    'direct-llm': 'prompts/direct-llm-v1.txt',
-    'direct-llm-told': 'prompts/direct-llm-v2-told.txt',
-    react: 'prompts/react-v1.txt',
-    'react-told': 'prompts/react-v2-told.txt',
-    'direct-validator': 'prompts/direct-llm-v1.txt (not-told) + lib/validator.ts (deterministic)',
-  },
   injection: {
     vehicle: {
       'direct-llm': 'SERVICE OUTPUT block appended to prompt',
       'direct-llm-told': 'SERVICE OUTPUT block appended to prompt',
-      react: 'fault text attached to get_support_record tool observation',
-      'react-told': 'fault text attached to get_support_record tool observation',
-      'direct-validator': 'SERVICE OUTPUT block appended to prompt',
+      react: 'SERVICE OUTPUT block delivered in initial prompt (sawFaultEvidence=true)',
+      'react-told': 'SERVICE OUTPUT block delivered in initial prompt (sawFaultEvidence=true)',
+      'direct-validator': 'Structured serviceOutputs + draftResponse checked by validator-v2.1-structured',
+      'rules-only': 'Structured serviceOutputs checked deterministically',
     },
     applicableToBaselines: APPLICABLE_TO_BASELINES,
     notApplicableToBaselines: ['jev-500'],
   },
-  gold: 'all fault scenarios expect halt; pass = arm emitted halt',
-  tables: {
-    notTold: notToldTable,
-    told: toldTable,
-  },
-  routerReference: (() => {
-    const ref = readRouterReference()
-    return ref ? `${ref.haltPass}/${ref.haltTotal} on fault scenarios (eval-results-v1.json)` : null
-  })(),
+  gold: 'all fault scenarios expect stop; upstream serviceError always fails',
+  tables: { notTold: notToldTable, told: toldTable },
+  routerReference: readRouterReference(),
   runs,
 }
 
-// convenience serialization: ensure the fallback in-memory strings survive
 const outPath = resolve(args.out)
 mkdirSync(dirname(outPath), { recursive: true })
 writeFileSync(outPath, JSON.stringify(out, null, 2))

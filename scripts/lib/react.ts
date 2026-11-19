@@ -25,6 +25,8 @@ const MAX_STEPS = 8
 export interface ReactOptions {
   mode?: PromptMode
   injectFault?: FaultKind
+  customEvidenceBlock?: string
+  deliverEvidenceInPrompt?: boolean
   model?: ModelKey
 }
 
@@ -41,6 +43,7 @@ export async function runReact(scenario: Scenario, opts?: ReactOptions): Promise
   outcome: BaselineOutcome
   text: string
   evidence: string
+  sawFaultEvidence: boolean
   model?: ModelKey
   modelVersion?: string
   temperature?: number
@@ -52,6 +55,9 @@ export async function runReact(scenario: Scenario, opts?: ReactOptions): Promise
 }> {
   const mode: PromptMode = opts?.mode ?? 'not-told'
   const inject = opts?.injectFault
+  const customEvidenceBlock = opts?.customEvidenceBlock
+  const serviceBlock = customEvidenceBlock ?? (inject ? faultEvidenceBlock(inject) : null)
+  const deliverInPrompt = opts?.deliverEvidenceInPrompt ?? Boolean(customEvidenceBlock)
   const model: ModelKey = opts?.model ?? 'gemini'
   const system = reactSystem(mode)
   const transcript: Array<{ role: 'user' | 'assistant' | 'tool'; text: string }> = []
@@ -65,10 +71,15 @@ export async function runReact(scenario: Scenario, opts?: ReactOptions): Promise
   let modelVersion: string | undefined
   let temperature: number | undefined
   let lastText = ''
-  let evidence = `CASE:\n${scenario.userInput}`
+  const initialCase = [
+    `CASE:\n${scenario.userInput}`,
+    ...(serviceBlock && deliverInPrompt ? ['', serviceBlock] : []),
+  ].join('\n')
+  let evidence = initialCase
+  let sawFaultEvidence = Boolean(serviceBlock && deliverInPrompt)
   let error: string | undefined
 
-  transcript.push({ role: 'user', text: `CASE:\n${scenario.userInput}` })
+  transcript.push({ role: 'user', text: initialCase })
 
   for (let step = 0; step < MAX_STEPS; step++) {
     const history = transcript.map((m) => `${m.role.toUpperCase()}: ${m.text}`).join('\n\n')
@@ -106,9 +117,10 @@ export async function runReact(scenario: Scenario, opts?: ReactOptions): Promise
         record = getSupportRecord(scenario)
         const observation = [
           `OBSERVATION: record follows\n${recordToText(record)}`,
-          ...(inject ? ['', faultEvidenceBlock(inject)] : []),
+          ...(serviceBlock && !deliverInPrompt ? ['', serviceBlock] : []),
         ].join('\n')
         evidence = observation
+        if (serviceBlock) sawFaultEvidence = true
         actions.push('get_support_record')
         transcript.push({ role: 'tool', text: observation })
         break
@@ -146,6 +158,7 @@ export async function runReact(scenario: Scenario, opts?: ReactOptions): Promise
           outcome: { decision, reasonCode },
           text: lastText,
           evidence,
+          sawFaultEvidence,
           model,
           modelVersion,
           temperature,
@@ -167,6 +180,7 @@ export async function runReact(scenario: Scenario, opts?: ReactOptions): Promise
     outcome: { decision, reasonCode },
     text: lastText,
     evidence,
+    sawFaultEvidence,
     model,
     modelVersion,
     temperature,

@@ -48,9 +48,9 @@ export async function callGemini(opts: {
   const key = process.env.GEMINI_API_KEY
   if (!key) throw new GeminiError('GEMINI_API_KEY is not set (put it in .env.local). The baselines never fake a model.', 401)
   const model = geminiModel()
-  // Explicit temperature so it can be RECORDED per run (Task 4). Default 0.7 is
-  // the documented standard for the flash-lite family; override via GEMINI_TEMPERATURE.
-  const temperature = Number(process.env.GEMINI_TEMPERATURE ?? 0.7)
+  // Explicit temperature so it can be RECORDED per run. Default 0 for
+  // deterministic policy evaluation; override via GEMINI_TEMPERATURE.
+  const temperature = Number(process.env.GEMINI_TEMPERATURE ?? 0)
   const body: Record<string, unknown> = {
     contents: [{ role: 'user', parts: [{ text: prompt }] }],
     generationConfig: { maxOutputTokens, temperature, ...(json ? { responseMimeType: 'application/json' } : {}) },
